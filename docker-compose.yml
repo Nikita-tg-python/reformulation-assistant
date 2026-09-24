@@ -1,0 +1,54 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: reformulation
+    ports:
+      # 5433 on the host: a local Postgres often already owns 5432 on localhost.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d reformulation"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  api:
+    build:
+      context: .
+      args:
+        # Same variable as the runtime setting: the image contains only this model (HF_HUB_OFFLINE=1).
+        EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/reformulation
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Dev-only runner for tests and lint: `make test`, `make lint`. Needs no uv on the host.
+  test:
+    image: ghcr.io/astral-sh/uv:0.8-python3.12-bookworm-slim
+    profiles: ["dev"]
+    working_dir: /work
+    volumes:
+      - .:/work
+      - test-venv:/venv
+    environment:
+      UV_PROJECT_ENVIRONMENT: /venv
+      UV_LINK_MODE: copy
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/reformulation
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  test-venv:

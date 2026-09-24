@@ -1,0 +1,64 @@
+[project]
+name = "reformulation-assistant"
+version = "0.1.0"
+description = "RAG + tool-calling agent for food R&D recipe reformulation"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "asyncpg>=0.29",
+    "pgvector>=0.3",
+    "numpy>=2.0",
+    "onnxruntime>=1.20",
+    "tokenizers>=0.20",
+    "huggingface-hub>=0.25",
+    "google-genai>=2.25",
+    "groq>=1.7",
+    "httpx>=0.27",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.6",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import order
+    "B",        # bugbear
+    "UP",       # pyupgrade
+    "ASYNC",    # blocking calls in async code
+    "SIM",      # simplifications
+    "C4",       # comprehensions
+    "PT",       # pytest style
+    "RUF",      # ruff-specific
+]
+ignore = [
+    # Ukrainian text in strings, comments and docstrings is intentional, not a lookalike.
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]

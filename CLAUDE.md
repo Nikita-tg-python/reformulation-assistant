@@ -1,0 +1,55 @@
+# Reformulation Assistant
+
+HTTP-сервіс для харчової R&D: технолог подає рецептуру і ціль (`remove_allergen`, `reduce_sugar`, `make_vegan`),
+сервіс повертає заміни інгредієнтів з джерелами, нутрієнти до/після на 100 г і `trace` викликів інструментів.
+Три частини: база знань (чанки з векторами в Postgres), RAG-пошук `/ask` з цитатами, агент `/reformulate`
+з власним циклом tool calling (3 інструменти: `search_knowledge_base`, `lookup_product`, `calc_nutrition`).
+Фронтенду немає, демо через Swagger UI на `/docs`.
+
+Повна специфікація (схема БД, ендпоінти, ліміти агента, тести, критерії готовності, план на день): [docs/spec.md](docs/spec.md).
+
+## Стек
+Python 3.12, uv, FastAPI, Pydantic v2, pydantic-settings, uvicorn, asyncpg з ручним SQL, PostgreSQL 16 + pgvector
+(`pgvector/pgvector:pg16`, індекс hnsw, косинусна відстань), ембединги `intfloat/multilingual-e5-small` (384) через ONNX Runtime без torch (не MiniLM зі спеки, бо корпус український),
+LLM: Gemini (основний), Groq (запасний), Open Food Facts API, Docker Compose, pytest + pytest-asyncio + httpx, ruff.
+
+## Структура
+```
+app/            main.py, config.py, db.py, schemas.py, embeddings.py, chunking.py, retrieval.py, ingest.py
+app/llm/        base.py (LLMClient), gemini.py, groq.py, fake.py (FakeLLM для тестів)
+app/agent/      loop.py (цикл tool calling), tools.py (3 інструменти + JSON-схеми), prompts.py
+app/routers/    documents.py, ask.py, reformulate.py
+data/corpus/    20 markdown-документів з frontmatter doc_id, title, doc_type
+migrations/     001_init.sql, застосовується на старті додатка (без Alembic)
+tests/          test_chunking, test_calc_nutrition, test_agent_loop, test_api
+k8s/            бонус
+```
+
+## Жорсткі правила
+- Жодного LangChain, LlamaIndex, LangGraph чи іншого агентного/LLM-фреймворку. Цикл агента пишемо самі.
+- LLM викликається тільки через інтерфейс `LLMClient` (`complete`, `complete_with_tools`) з `app/llm/base.py`.
+  Провайдер обирається змінною `LLM_PROVIDER`. Жодних прямих викликів SDK провайдерів поза `app/llm/`.
+- Тести тільки з `FakeLLM` і фейковим ембедером, без ключів і без інтернету. Живий LLM у тестах ніколи.
+  Інтеграційні тести з БД пропускаються через `pytest.mark.skipif`, якщо немає `DATABASE_URL`.
+- Нутрієнти рахує тільки `calc_nutrition` (чиста арифметика на Python), ніколи LLM і ніколи вручну в промпті.
+- Єдиний формат помилок для всіх ендпоінтів: `{"error": {"code": "...", "message": "..."}}`.
+- Секрети тільки зі змінних оточення через pydantic-settings. Файл `.env` ніколи не читати, не виводити
+  і не комітити. Нові змінні додавати в `.env.example` з коментарем.
+- Усі тіла запитів і відповідей описані Pydantic-моделями в `app/schemas.py`.
+
+## Процес
+- Працюємо блок за блоком за розділом «План на день» у специфікації. Один блок за раз.
+- Після блоку зупинитися і дати контрольну точку для ручної перевірки. Наступний блок не починати без команди.
+- Один коміт на блок, з читабельним повідомленням. Не комітити без підтвердження.
+- Якщо рішення неочевидне (hnsw vs ivfflat, asyncpg vs ORM тощо), коротко пояснити чому.
+
+## Команди
+Хосту потрібні лише Docker і make (uv не встановлений; тести й ruff ідуть у контейнері).
+```bash
+cp .env.example .env        # вписати ключ LLM; .env не читати і не комітити
+make up                     # збірка, api + db, чекає /health
+make ingest                 # залити data/corpus/ (ідемпотентно)
+make test                   # pytest без ключів і інтернету (+ інтеграційні на db з compose)
+make lint                   # ruff check + format --check; make fmt виправляє
+make logs / make down       # JSON-логи api / зупинка (дані лишаються)
+```
