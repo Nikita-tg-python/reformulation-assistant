@@ -1,5 +1,7 @@
 # Reformulation Assistant
 
+[![CI](https://github.com/Nikita-tg-python/reformulation-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/Nikita-tg-python/reformulation-assistant/actions/workflows/ci.yml)
+
 HTTP-сервіс для харчової R&D. Технолог подає рецептуру й ціль: прибрати алерген, знизити цукор або зробити продукт веганським. Сервіс пропонує заміни інгредієнтів із посиланнями на внутрішні документи та Open Food Facts і показує нутрієнти на 100 г до та після.
 
 Пет-проєкт на один робочий день під вакансію Backend & AI Engineer. Стек: Python 3.12, FastAPI, PostgreSQL + pgvector, RAG, агент з tool calling, Docker. Повна постановка задачі лежить у [docs/task.docx](docs/task.docx).
@@ -68,7 +70,7 @@ make ingest            # заливає 20 документів із data/corpus
 
 Без `make`: `docker compose up -d --build`, потім `docker compose exec api python -m app.ingest data/corpus/`.
 
-Решта команд: `make test` (pytest без ключів і без інтернету, разом з інтеграційними тестами на базі compose), `make lint`, `make logs`, `make down`, `make clean` (видаляє й дані). Повний список: `make help`.
+Решта команд: `make test` (pytest без ключів і без інтернету, разом з інтеграційними тестами на базі compose; у CI на GitHub Actions ті самі тести йдуть проти service-контейнера pgvector, без жодного пропущеного), `make lint`, `make logs`, `make down`, `make clean` (видаляє й дані). Повний список: `make help`.
 
 `/health` і `/documents` працюють і без ключа LLM. Без ключа `/ask` і `/reformulate` повертають `503 llm_not_configured`.
 
@@ -210,4 +212,4 @@ docker compose exec db psql -U postgres -d reformulation -c \
 1. **Структуровані факти специфікацій.** Алергени й доменні ліміти (наприклад, еритрит ≤ 8% маси) при інгесті зберігати окремими полями й перевіряти кодом, як уже перевіряються нутрієнти. Живі прогони показали, що саме цього бракує: модель пропустила глютен вівса і перевищила ліміт еритриту.
 2. **Гібридний пошук.** Повнотекстовий пошук через `tsvector` плюс Reciprocal Rank Fusion. У живих прогонах модель шукала за кодами документів («SPEC-001 SPEC-007»), а векторний пошук на таких запитах слабкий.
 3. **Оцінка якості RAG.** `eval/questions.jsonl` з очікуваними doc_id і recall@5 у CI. Вибір моделі ембедингів уже робився на такому ручному замірі, його варто зробити регресійним тестом.
-4. **CI і деплой.** GitHub Actions: ruff, pytest з Postgres як service container, збірка образу. Далі маніфести для kind: Deployment з liveness і readiness на `/health`, StatefulSet для Postgres.
+4. **Деплой.** Маніфести для kind: Deployment з liveness і readiness на `/health`, StatefulSet для Postgres. Потім хмара: образ у registry, керований Postgres з pgvector, секрети в secret manager.
