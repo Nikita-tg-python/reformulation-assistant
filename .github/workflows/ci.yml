@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0  # no floating v10 tag upstream (last one is v7)
         with:
           version: "0.8.24"  # same uv as the Dockerfile and Makefile (ghcr.io/astral-sh/uv:0.8)
           python-version: "3.12"
