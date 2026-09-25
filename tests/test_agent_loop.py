@@ -602,3 +602,35 @@ async def test_recipe_facts_are_searched_concurrently_in_ingredient_order():
     assert [e["arguments"]["query"] for e in facts] == [i.name for i in REQUEST.ingredients]
     lines = llm.calls[0][1].content.split(prompts.RECIPE_FACTS_HEADER)[1].strip().splitlines()
     assert [line.split(" (")[0] for line in lines] == [f"- {i.name}" for i in REQUEST.ingredients]
+
+
+# ---------- structured spec data (KAN-16) ----------
+
+
+class MismatchTools(FakeTools):
+    """calc_nutrition flags the original milk numbers as not matching the spec in the DB."""
+
+    async def execute(self, name, arguments):
+        result = await super().execute(name, arguments)
+        if name == "calc_nutrition" and arguments["ingredients"][0]["name"] == "молоко 2.5%":
+            result["data_mismatches"] = [
+                {"ingredient": "молоко 2.5%", "doc_id": "SPEC-001",
+                 "given": {"protein_g": 3.5}, "expected": {"protein_g": 2.8}}
+            ]  # fmt: skip
+        return result
+
+
+async def test_faked_input_nutrients_end_up_in_warnings():
+    result, _, _ = await run([*HAPPY, final()], tools=MismatchTools())
+
+    assert result.answer.warnings[0] == "Білок падає приблизно на 90%."  # the model's own
+    assert result.answer.warnings[1] == (
+        "Нутрієнти «молоко 2.5%» не збігаються зі специфікацією SPEC-001 в базі знань "
+        "(protein_g 3.5 замість 2.8): перевірте вхідні дані розрахунку."
+    )
+    assert len(result.answer.warnings) == 2
+
+
+async def test_no_warning_when_inputs_match_the_specs():
+    result, _, _ = await run([*HAPPY, final()])
+    assert result.answer.warnings == ["Білок падає приблизно на 90%."]

@@ -215,6 +215,7 @@ class _CalcCall:
     grams: list[float]
     per_100g: dict[str, float | None]
     without_data: list[str]  # ingredient names with grams > 0 and no nutrients
+    mismatches: tuple[dict[str, Any], ...] = ()  # inputs that contradict a spec in the DB
 
 
 class _Evidence:
@@ -247,6 +248,7 @@ class _Evidence:
                             v is not None for v in (i.get("nutrients_per_100g") or {}).values()
                         )
                     ],
+                    mismatches=tuple(result.get("data_mismatches", ())),
                 )
             )
 
@@ -271,7 +273,33 @@ def _parse_final(text: str, evidence: _Evidence, request: ReformulateRequest) ->
         )
     _check_nutrition(answer, evidence, request)
     _check_allergens(answer, evidence, request)
+    for warning in _data_warnings(answer, evidence):
+        if warning not in answer.warnings:
+            answer.warnings.append(warning)
     return answer
+
+
+def _data_warnings(answer: ReformulationDraft, evidence: _Evidence) -> list[str]:
+    """Warnings for calc_nutrition inputs that contradict documents.nutrients.
+
+    A warning and not a validation error: an ingredient is matched to a spec by its name,
+    which is fuzzy, and a rejected answer costs a retry out of 6 LLM calls. The numbers are
+    still reported, so a technologist sees the data problem next to the result.
+    """
+    used = [
+        c
+        for c in evidence.nutrition
+        if _same_nutrition(answer.nutrition_per_100g.before, c.per_100g)
+        or _same_nutrition(answer.nutrition_per_100g.after, c.per_100g)
+    ]
+    warnings = []
+    for m in (m for c in used for m in c.mismatches):
+        diff = ", ".join(f"{n} {m['given'][n]:g} замість {m['expected'][n]:g}" for n in m["given"])
+        warnings.append(
+            f"Нутрієнти «{m['ingredient']}» не збігаються зі специфікацією {m['doc_id']} "
+            f"в базі знань ({diff}): перевірте вхідні дані розрахунку."
+        )
+    return list(dict.fromkeys(warnings))
 
 
 def _check_allergens(

@@ -64,10 +64,12 @@ class FakePool:
         chunks: list[dict[str, Any]] | None = None,
         healthy: bool = True,
         documents: dict[str, str] | None = None,
+        specs: list[dict[str, Any]] | None = None,
     ) -> None:
         self.chunks = chunks or []  # dicts with doc_id, title, text, score
         self.healthy = healthy
         self.documents = documents or {}  # ingredient_spec doc_id -> content
+        self.specs = specs or []  # rows of retrieval.spec_catalog: doc_id, title, nutrients
 
     def acquire(self, **kwargs: Any) -> _Acquire:
         return _Acquire(self)
@@ -80,8 +82,14 @@ class FakePool:
         raise AssertionError(f"FakePool: unexpected query {query!r}")
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
-        if "FROM documents" in query:  # retrieval.spec_nutrients
-            return [{"doc_id": d, "content": c} for d, c in self.documents.items() if d in args[0]]
+        if "nutrients IS NOT NULL" in query:  # retrieval.spec_catalog
+            return self.specs
+        if "FROM documents" in query:  # retrieval.spec_facts
+            return [
+                {"doc_id": d, "content": c, "allergens": None}
+                for d, c in self.documents.items()
+                if d in args[0]
+            ]
         if "websearch_to_tsquery" in query:  # full-text half of hybrid search: no matches
             return []
         top_k = args[1]

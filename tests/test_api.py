@@ -272,6 +272,44 @@ async def test_hybrid_search_puts_the_document_with_that_code_first(make_client,
 
 
 @needs_db
+async def test_ingest_fills_structured_spec_facts_and_calc_checks_them(make_client, db_pool):
+    from pathlib import Path
+
+    from app.agent.tools import AgentTools
+    from app.ingest import load_folder
+
+    client = await make_client(db_pool)
+    corpus = {
+        doc.doc_id: doc for _, doc in load_folder(Path(__file__).parent.parent / "data/corpus")
+    }
+    for doc_id in ("SPEC-001", "SPEC-012", "GUIDE-001"):
+        body = corpus[doc_id].model_dump()
+        assert (await client.post("/documents", json=body)).status_code == 200
+
+    rows = {
+        r["doc_id"]: r
+        for r in await db_pool.fetch("SELECT doc_id, nutrients, allergens FROM documents")
+    }
+    assert rows["SPEC-001"]["allergens"] == ["milk"]
+    assert json.loads(rows["SPEC-012"]["nutrients"])[1]["variant"] == "SG-3"
+    assert rows["GUIDE-001"]["nutrients"] is None
+    assert rows["GUIDE-001"]["allergens"] is None
+
+    tools = AgentTools(db_pool, FakeEmbedder())
+    found = await tools.execute("search_knowledge_base", {"query": "молоко коров'яче"})
+    milk = next(r for r in found["results"] if r["doc_id"] == "SPEC-001")
+    assert milk["allergens"] == ["milk"]
+    assert "kcal: 52" in milk["nutrients_per_100g"]
+
+    faked = {"kcal": 52, "protein_g": 3.5, "fat_g": 2.5, "carbs_g": 4.7, "sugar_g": 4.7}
+    calc = await tools.execute(
+        "calc_nutrition",
+        {"ingredients": [{"name": "молоко 2.5%", "grams": 800, "nutrients_per_100g": faked}]},
+    )
+    assert calc["data_mismatches"][0]["given"] == {"protein_g": 3.5}
+
+
+@needs_db
 async def test_reformulate_records_successful_and_timed_out_runs(make_client, db_pool, monkeypatch):
     from app.config import Settings
     from app.routers import reformulate as reformulate_router

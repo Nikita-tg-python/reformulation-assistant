@@ -15,15 +15,15 @@ LLM: Groq (за замовчуванням, `LLM_PROVIDER=groq`) або Gemini, 
 
 ## Структура
 ```
-app/            main, config, db, schemas, embeddings, chunking, retrieval, ingest, errors, deps, logging_config
+app/            main, config, db, schemas, embeddings, chunking, retrieval, specs, ingest, errors, deps, logging_config
 app/llm/        base.py (LLMClient, повтори), gemini.py, groq.py, fake.py (FakeLLM для тестів)
 app/agent/      loop.py (цикл tool calling), pipeline.py (фіксований пайплайн, AGENT_MODE=pipeline),
                 tools.py (3 інструменти + JSON-схеми), prompts.py
 app/routers/    documents.py, ask.py, reformulate.py
 data/corpus/    20 markdown-документів з frontmatter doc_id, title, doc_type
-migrations/     001_init, 002_run_request_id, 003_fulltext (.sql); застосовуються на старті, без Alembic
+migrations/     001_init, 002_run_request_id, 003_fulltext, 004_structured_specs; на старті, без Alembic
 tests/          test_chunking, test_calc_nutrition, test_agent_loop, test_pipeline, test_tools,
-                test_llm_retries, test_retrieval, test_eval, test_api (+ conftest.py, fakes.py)
+                test_llm_retries, test_retrieval, test_specs, test_eval, test_api (+ conftest, fakes)
 eval/           questions.jsonl (10 питань з doc_id) + run.py: recall@5 і MRR, vector vs hybrid
 k8s/            бонус: kustomize для kind (Postgres, api, Job інжесту); k8s/secrets.env не комітити
 .github/        workflows/ci.yml: ruff, pytest з pgvector, eval, збірка образу, kustomize

@@ -15,7 +15,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.embeddings import Embedder
 from app.llm.base import ToolSpec
-from app.retrieval import search_chunks, spec_nutrients
+from app.retrieval import search_chunks, spec_catalog, spec_facts
+from app.specs import spec_mismatches
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,7 @@ class AgentTools:
         self._embedder = embedder
         self._http = http
         self._product_cache: dict[str, dict[str, Any]] = {}
+        self._specs: list[dict[str, Any]] | None = None  # spec catalog, loaded once per run
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Run a tool by name. Unknown tools and invalid arguments come back as errors."""
@@ -216,7 +218,8 @@ class AgentTools:
             if name == "lookup_product":
                 return await self.lookup_product(LookupProductArgs.model_validate(arguments).name)
             if name == "calc_nutrition":
-                return calc_nutrition(CalcNutritionArgs.model_validate(arguments).ingredients)
+                ingredients = CalcNutritionArgs.model_validate(arguments).ingredients
+                return await self.calc_nutrition_checked(ingredients)
         except ValidationError as exc:
             return _error("invalid_arguments", _describe(exc))
         return _error("unknown_tool", f"no tool named {name!r}")
@@ -233,7 +236,7 @@ class AgentTools:
         for c in chunks:  # already ordered by score
             if c.doc_id not in best and len(best) < top_k:
                 best[c.doc_id] = c
-        nutrients = await spec_nutrients(self._pool, sorted(best))
+        facts = await spec_facts(self._pool, sorted(best))
         results = []
         for c in best.values():
             item = {
@@ -242,10 +245,23 @@ class AgentTools:
                 "text": _shorten(c.text, KB_TEXT_LIMIT),
                 "score": c.score,
             }
-            if c.doc_id in nutrients:
-                item["nutrients_per_100g"] = nutrients[c.doc_id]
+            item.update(facts.get(c.doc_id, {}))  # nutrients_per_100g, allergens for specs
             results.append(item)
         return {"results": results}
+
+    async def calc_nutrition_checked(
+        self, ingredients: list[NutritionIngredient]
+    ) -> dict[str, Any]:
+        """calc_nutrition plus a data check: inputs named like a knowledge-base spec must carry
+        that spec's numbers (documents.nutrients, tolerance 0.05). Mismatches are returned in
+        data_mismatches, so the model sees them now and the answer gets a warning later."""
+        result = calc_nutrition(ingredients)
+        if self._specs is None:
+            self._specs = await spec_catalog(self._pool)
+        mismatches = spec_mismatches([i.model_dump() for i in ingredients], self._specs)
+        if mismatches:
+            result["data_mismatches"] = mismatches
+        return result
 
     async def lookup_product(self, name: str) -> dict[str, Any]:
         key = " ".join(name.lower().split())

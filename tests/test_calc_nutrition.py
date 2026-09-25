@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.agent.tools import NUTRIENTS, AgentTools, NutritionIngredient, calc_nutrition
+from tests.fakes import FakePool
 
 
 def ing(name: str, grams: float, **nutrients: float | None) -> NutritionIngredient:
@@ -104,7 +105,7 @@ def test_negative_grams_rejected_by_model():
 
 
 async def test_tool_call_with_invalid_arguments_returns_error_not_exception():
-    tools = AgentTools(pool=None, embedder=None)  # calc_nutrition needs neither
+    tools = AgentTools(pool=FakePool(), embedder=None)  # the pool only serves the spec check
     result = await tools.execute(
         "calc_nutrition", {"ingredients": [{"name": "молоко", "grams": -5}]}
     )
@@ -113,7 +114,7 @@ async def test_tool_call_with_invalid_arguments_returns_error_not_exception():
 
 
 async def test_tool_call_happy_path_through_execute():
-    tools = AgentTools(pool=None, embedder=None)
+    tools = AgentTools(pool=FakePool(), embedder=None)
     result = await tools.execute(
         "calc_nutrition",
         {"ingredients": [i.model_dump() for i in yogurt()]},

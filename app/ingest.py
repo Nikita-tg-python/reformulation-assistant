@@ -5,6 +5,7 @@ CLI: python -m app.ingest data/corpus/
 
 import argparse
 import asyncio
+import json
 import logging
 import re
 import sys
@@ -18,6 +19,7 @@ from app.config import get_settings
 from app.db import create_pool
 from app.embeddings import Embedder, OnnxEmbedder
 from app.schemas import DocumentIn
+from app.specs import parse_allergens, parse_nutrients
 
 _FRONTMATTER = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*\n(.*)\Z", re.DOTALL)
 
@@ -30,23 +32,30 @@ async def ingest_document(pool: asyncpg.Pool, embedder: Embedder, doc: DocumentI
     chunks = chunk_text(doc.content, embedder.token_spans)
     # Embed before opening the transaction so row locks aren't held during CPU work.
     vectors = await embedder.embed_passages(chunks) if chunks else []
+    is_spec = doc.doc_type == "ingredient_spec"
+    nutrients = parse_nutrients(doc.content) if is_spec else None
+    allergens = parse_allergens(doc.content) if is_spec else None
 
     async with pool.acquire() as conn, conn.transaction():
         # Upsert first: its row lock serialises concurrent ingests of the same doc_id,
         # so the DELETE below always sees the other transaction's committed chunks.
         await conn.execute(
             """
-            INSERT INTO documents (doc_id, title, doc_type, content)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO documents (doc_id, title, doc_type, content, nutrients, allergens)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6)
             ON CONFLICT (doc_id) DO UPDATE
                SET title = EXCLUDED.title,
                    doc_type = EXCLUDED.doc_type,
-                   content = EXCLUDED.content
+                   content = EXCLUDED.content,
+                   nutrients = EXCLUDED.nutrients,
+                   allergens = EXCLUDED.allergens
             """,
             doc.doc_id,
             doc.title,
             doc.doc_type,
             doc.content,
+            json.dumps(nutrients, ensure_ascii=False) if nutrients is not None else None,
+            allergens,
         )
         await conn.execute("DELETE FROM chunks WHERE doc_id = $1", doc.doc_id)
         await conn.executemany(

@@ -1,8 +1,10 @@
 """Chunk search: vector (pgvector, cosine, hnsw) or hybrid (vector + full text, RRF)."""
 
+import json
 import re
 from collections.abc import Hashable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import asyncpg
 
@@ -104,24 +106,48 @@ _NUTRIENTS_SECTION = re.compile(r"^## Нутрієнти на 100 г[^\n]*\n(.*?
 NUTRIENTS_TEXT_LIMIT = 300
 
 
-async def spec_nutrients(pool: asyncpg.Pool, doc_ids: list[str]) -> dict[str, str]:
-    """The "Нутрієнти на 100 г" section of ingredient specs, as one short line per doc.
+async def spec_facts(pool: asyncpg.Pool, doc_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Facts of ingredient specs among doc_ids: {doc_id: {"nutrients_per_100g", "allergens"}}.
 
-    The numbers sit near the end of a spec, often outside the chunk that search returns,
-    so the agent gets them per document instead of hunting for them.
+    nutrients_per_100g is the "Нутрієнти на 100 г" section as one short line: the numbers sit
+    near the end of a spec, often outside the chunk that search returns, and the line keeps
+    variant names and notes ("уся лактоза"). allergens are the EU codes parsed at ingest
+    (documents.allergens, NULL for specs ingested before migration 004).
     """
     rows = await pool.fetch(
-        "SELECT doc_id, content FROM documents "
+        "SELECT doc_id, content, allergens FROM documents "
         "WHERE doc_id = ANY($1::text[]) AND doc_type = 'ingredient_spec'",
         doc_ids,
     )
-    sections = {}
+    facts: dict[str, dict[str, Any]] = {}
     for row in rows:
+        item: dict[str, Any] = {}
         match = _NUTRIENTS_SECTION.search(row["content"])
         if match:
             lines = (
                 " ".join(ln.strip().removeprefix("- ").split())
                 for ln in match.group(1).splitlines()
             )
-            sections[row["doc_id"]] = "; ".join(ln for ln in lines if ln)[:NUTRIENTS_TEXT_LIMIT]
-    return sections
+            item["nutrients_per_100g"] = "; ".join(ln for ln in lines if ln)[:NUTRIENTS_TEXT_LIMIT]
+        if row["allergens"] is not None:
+            item["allergens"] = list(row["allergens"])
+        if item:
+            facts[row["doc_id"]] = item
+    return facts
+
+
+async def spec_catalog(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    """Every spec with structured nutrients: [{"doc_id", "title", "nutrients"}] (small: 12 rows)."""
+    rows = await pool.fetch(
+        "SELECT doc_id, title, nutrients FROM documents "
+        "WHERE doc_type = 'ingredient_spec' AND nutrients IS NOT NULL ORDER BY doc_id"
+    )
+    return [
+        {"doc_id": r["doc_id"], "title": r["title"], "nutrients": _json(r["nutrients"])}
+        for r in rows
+    ]
+
+
+def _json(value: Any) -> Any:
+    # asyncpg returns JSONB as text unless a codec is registered; the test fake gives objects.
+    return json.loads(value) if isinstance(value, str) else value
