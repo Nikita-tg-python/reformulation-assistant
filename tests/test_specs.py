@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.agent.tools import AgentTools
-from app.specs import NUTRIENTS, parse_allergens, parse_nutrients, spec_mismatches
+from app.specs import NUTRIENTS, own_spec, parse_allergens, parse_nutrients, spec_mismatches
 from tests.fakes import FakePool
 
 CORPUS = Path(__file__).resolve().parent.parent / "data" / "corpus"
@@ -111,3 +111,26 @@ async def test_calc_nutrition_tool_returns_data_mismatches():
     assert "data_mismatches" not in ok
     assert bad["per_100g"]["kcal"] == 250  # the numbers are still computed as given
     assert bad["data_mismatches"][0]["doc_id"] == "SPEC-006"
+
+
+def _hit(doc_id: str, title: str, nutrients: str | None = "kcal: 1") -> dict:
+    return {"doc_id": doc_id, "title": title, "nutrients_per_100g": nutrients}
+
+
+COCONUT = _hit("SPEC-002", "Кокосове молоко 2.5% жиру для ферментації")
+COW = _hit("SPEC-001", "Молоко коров'яче 2.5% жиру")
+STARTER = _hit("SPEC-009", "Закваска йогуртова, молочна робоча і рослинна DVS")
+
+
+def test_own_spec_is_chosen_by_title_not_by_rank():
+    # Live: hybrid search ranked coconut milk first for "закваска" (its text mentions it).
+    assert own_spec("закваска", [COCONUT, STARTER]) == STARTER
+    # Both titles contain "молоко": the closer one (1 of 4 words vs 1 of 6) wins.
+    assert own_spec("молоко", [COCONUT, COW]) == COW
+    assert own_spec("молоко 2.5%", [COCONUT, COW]) == COW
+
+
+def test_own_spec_needs_a_title_match_and_nutrients():
+    assert own_spec("полуниця заморожена", [COCONUT, COW]) is None
+    assert own_spec("молоко", [_hit("SPEC-001", "Молоко коров'яче", nutrients=None)]) is None
+    assert own_spec("кокосове молоко", [COW, COCONUT]) == COCONUT

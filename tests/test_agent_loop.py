@@ -484,10 +484,14 @@ def _spec(doc_id: str, title: str, nutrients: str) -> dict:
 
 ORIGINAL_SPECS = {
     "молоко 2.5%": _spec(
-        "SPEC-001", "Молоко", "kcal: 52; protein_g: 2.8; fat_g: 2.5; carbs_g: 4.7; sugar_g: 4.7"
+        "SPEC-001",
+        "Молоко коров'яче 2.5% жиру",
+        "kcal: 52; protein_g: 2.8; fat_g: 2.5; carbs_g: 4.7; sugar_g: 4.7",
     ),
     "цукор": _spec(
-        "SPEC-006", "Цукор", "kcal: 400; protein_g: 0; fat_g: 0; carbs_g: 100; sugar_g: 100"
+        "SPEC-006",
+        "Цукор білий кристалічний",
+        "kcal: 400; protein_g: 0; fat_g: 0; carbs_g: 100; sugar_g: 100",
     ),
 }
 
@@ -508,7 +512,10 @@ async def test_original_ingredient_facts_are_prepared_before_the_first_call():
 
     first_user = llm.calls[0][1].content
     assert prompts.RECIPE_FACTS_HEADER in first_user
-    assert "- молоко 2.5% (800 g): [SPEC-001] Молоко | nutrients_per_100g: kcal: 52" in first_user
+    assert (
+        "- молоко 2.5% (800 g): [SPEC-001] Молоко коров'яче 2.5% жиру | "
+        "nutrients_per_100g: kcal: 52" in first_user
+    )
     assert (
         "- полуниця заморожена (100 g): no spec, use lookup_product with an English name"
         in first_user

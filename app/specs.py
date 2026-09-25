@@ -75,6 +75,27 @@ def _words(text: str) -> set[str]:
     return {t.strip(".-") for t in tokens} - {""}
 
 
+def own_spec(name: str, results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The spec of an ingredient among search results: the title must contain every word of
+    the name, and the closest title wins (most of its words covered; ties keep search order).
+
+    The first result with nutrients is not enough: hybrid search ranks "Кокосове молоко"
+    first for "закваска" (its text mentions закваска), and the recipe got coconut numbers.
+    "молоко" matches both SPEC-001 "Молоко коров'яче 2.5% жиру" and SPEC-002 "Кокосове
+    молоко ...": coverage 1/4 beats 1/6, so plain milk is cow's milk.
+    """
+    words = _words(name)
+    best, best_cover = None, 0.0
+    for r in results:
+        title = _words(r.get("title", ""))
+        if not r.get("nutrients_per_100g") or not words or not words <= title:
+            continue
+        cover = len(words) / len(title)
+        if cover > best_cover:
+            best, best_cover = r, cover
+    return best
+
+
 def spec_mismatches(
     ingredients: list[dict[str, Any]], specs: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:

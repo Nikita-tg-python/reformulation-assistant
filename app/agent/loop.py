@@ -19,6 +19,7 @@ from app.agent.tools import NUTRIENTS, TOOL_SPECS, compact_result
 from app.errors import AppError
 from app.llm.base import LLMClient, LLMError, Message, ToolCall
 from app.schemas import NutritionValues, ReformulateRequest, ReformulationDraft
+from app.specs import own_spec
 
 Trace = list[dict[str, Any]]
 
@@ -187,7 +188,7 @@ async def _recipe_facts(
     for ingredient, call, result in zip(request.ingredients, calls, results, strict=True):
         evidence.add(call.name, call.arguments, result)
         _record(trace, _trace_call(0, call, result), 0)
-        spec = next((r for r in result.get("results", []) if r.get("nutrients_per_100g")), None)
+        spec = own_spec(ingredient.name, result.get("results", []))
         if spec:
             lines.append(
                 f"- {ingredient.name} ({ingredient.grams:g} g): [{spec['doc_id']}] "

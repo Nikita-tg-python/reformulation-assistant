@@ -38,6 +38,7 @@ from app.agent.loop import (
 from app.agent.tools import NUTRIENTS
 from app.llm.base import LLMClient, Message, ToolCall
 from app.schemas import ReformulateRequest
+from app.specs import own_spec
 
 MAX_LLM_CALLS = 3
 MAX_CHOOSE_CALLS = 2  # a second choice when the first one is invalid or lacks data
@@ -135,8 +136,9 @@ class _Pipeline:
             result = await self._tool("search_knowledge_base", {"query": query, "top_k": 3})
             for item in result.get("results", []):
                 self.docs.setdefault(item["doc_id"], item)
-                if own_of and _key(own_of) not in self.own_spec and item.get("nutrients_per_100g"):
-                    self.own_spec[_key(own_of)] = item["doc_id"]
+            spec = own_spec(own_of, result.get("results", [])) if own_of else None
+            if spec:
+                self.own_spec[_key(own_of)] = spec["doc_id"]
 
     # ---------- steps 2-3: choice, Open Food Facts, verified numbers ----------
 
