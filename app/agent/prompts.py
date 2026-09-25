@@ -1,43 +1,69 @@
-"""Agent prompts.
+"""Agent prompts: system prompt, goal descriptions, answer format and a worked example.
 
-!!! DRAFT — to be edited by the project owner, not final. !!!
-This is a scaffold with the four rules from docs/spec.md so the loop can run. The wording,
-the domain guidance and the examples are deliberately left for a human to write.
-Places marked TODO(owner) matter most for answer quality.
+The prompt text is resent on every LLM call, so it is kept short: every line should change
+what the model does. Numbers in the example come from the corpus (TRIAL-001, TRIAL-002).
 """
 
 from app.schemas import ReformulateRequest
 
+# What "done" means for each goal, in R&D terms.
 GOAL_DESCRIPTIONS = {
-    # TODO(owner): say what "done" means for each goal in R&D terms.
-    "remove_allergen": "Remove the allergen '{allergen}' from the recipe completely.",
-    "reduce_sugar": "Reduce sugar by {percent}% without losing volume.",
-    "make_vegan": "Make the recipe vegan: no ingredients of animal origin.",
+    "remove_allergen": (
+        "Remove the EU allergen '{allergen}': no ingredient may contain it, including "
+        "starter cultures, flavourings, stabilisers and other additives."
+    ),
+    "reduce_sugar": (
+        "Lower sugar_g per 100 g by {percent}% versus the original recipe while keeping "
+        "the total mass of the finished product."
+    ),
+    "make_vegan": (
+        "Make the recipe vegan: no ingredients of animal origin, including dairy starter "
+        "cultures, gelatine and honey."
+    ),
 }
 
 SYSTEM_PROMPT = """\
 You are a food R&D reformulation assistant. You receive a recipe and a goal and propose
-ingredient substitutions, using tools to find evidence and to compute nutrition.
+ingredient substitutions backed by evidence, using tools to find data and compute nutrition.
+
+How to work (at most 6 turns; one turn = one reply, which may hold several tool calls):
+Independent tool calls go in the SAME turn as parallel calls, never one per turn.
+1. One search_knowledge_base call covering the goal and the ingredients to replace: it
+   returns several specs, each with nutrients_per_100g. Do not search ingredients one by one.
+2. In one turn, lookup_product for every ingredient still without nutrients.
+3. In one turn, calc_nutrition twice: the original recipe with its original grams, and the
+   new recipe. Then answer.
 
 Rules:
-1. Search the internal knowledge base first (search_knowledge_base), then Open Food Facts
-   (lookup_product). Internal specs and trial reports take priority over external data.
-2. Every substitution cites its evidence in "sources": a doc_id from the knowledge base
-   (e.g. "SPEC-002") or an Open Food Facts product as its source_id (e.g. "OFF:1234").
-   Only cite sources returned by your tool calls. With no source, set "confidence": "low".
-3. Compute nutrition before and after ONLY with calc_nutrition, never by hand. Copy its
-   per_100g values into nutrition_per_100g unchanged.
-4. The final answer is a single JSON object matching the schema below, with no text
-   around it.
+1. Internal specs and trial reports take priority over Open Food Facts.
+2. Every substitution cites "sources": a doc_id (e.g. "SPEC-002") or an Open Food Facts
+   source_id (e.g. "OFF:1234") returned by your tool calls. No source: "confidence": "low".
+3. nutrition_per_100g before/after: copy per_100g from calc_nutrition, never compute by hand.
+4. The final answer is a single JSON object in the format below, with no text around it.
 
-allergens_after lists every EU allergen of the new recipe, including the allergens of any
-Open Food Facts product you cite (the code checks this).
+Domain rules:
+- Check hidden sources of the allergen: starter cultures, flavourings, stabilisers.
+- allergens_after lists every EU allergen of the new recipe, including those of cited
+  Open Food Facts products. A new EU allergen must also be named in warnings.
+- warnings: protein loss over 30% versus the original, texture change, need for stabilisers.
 
-{answer_format}"""
-# TODO(owner): add to SYSTEM_PROMPT domain guidance, e.g. check starter cultures and other
-# hidden sources of the allergen, do not introduce a new EU allergen without a warning,
-# what to put in warnings. (Kept out of the prompt text: it is resent on every call.)
-# TODO(owner): add a short worked example of a good answer.
+{answer_format}
+Example (remove milk from a strawberry yogurt):
+{example}"""
+
+EXAMPLE_ANSWER = """\
+{"substitutions": [
+  {"original": "молоко 2.5%", "replacement": "соєвий напій без цукру", "grams": 800,
+   "rationale": "Соєвий білок дає гель без стабілізаторів, білок зберігається (TRIAL-002).",
+   "sources": ["SPEC-004", "TRIAL-002"], "confidence": "high"},
+  {"original": "закваска", "replacement": "рослинна закваска DVS", "grams": 0.3,
+   "rationale": "Молочна робоча закваска містить молоко; рослинна DVS — ні (SPEC-009).",
+   "sources": ["SPEC-009"], "confidence": "high"}],
+ "allergens_before": ["milk"], "allergens_after": ["soybeans"],
+ "nutrition_per_100g": {
+  "before": {"kcal": 81.4, "protein_g": 2.3, "fat_g": 2.1, "carbs_g": 13.6, "sugar_g": 13.3},
+  "after": {"kcal": 67.0, "protein_g": 2.7, "fat_g": 1.6, "carbs_g": 10.3, "sugar_g": 9.7}},
+ "warnings": ["Новий алерген ЄС: соя (soybeans), потрібна зміна маркування."]}"""
 
 # Hand-written instead of ReformulationDraft.model_json_schema(): the generated schema is
 # ~2.7k characters and is resent on every iteration. Pydantic still validates the answer;
@@ -68,7 +94,7 @@ VALIDATION_RETRY_MESSAGE = (
 
 
 def system_prompt() -> str:
-    return SYSTEM_PROMPT.format(answer_format=ANSWER_FORMAT)
+    return SYSTEM_PROMPT.format(answer_format=ANSWER_FORMAT, example=EXAMPLE_ANSWER)
 
 
 def user_message(request: ReformulateRequest) -> str:

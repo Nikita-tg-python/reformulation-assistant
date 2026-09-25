@@ -437,5 +437,38 @@ async def test_two_data_less_calcs_get_the_missing_data_message_not_the_separati
     assert "nutrients_per_100g from search_knowledge_base" in first_error
 
 
-def test_owner_notes_are_not_sent_to_the_model():
-    assert "TODO" not in prompts.system_prompt()
+def test_system_prompt_has_no_todo_and_contains_the_example():
+    prompt = prompts.system_prompt()
+
+    assert "TODO" not in prompt
+    assert '"allergens_after": ["soybeans"]' in prompt
+    assert "рослинна закваска DVS" in prompt  # the example replaces the hidden allergen too
+    assert "{" not in prompts.GOAL_DESCRIPTIONS["make_vegan"]
+
+
+def test_example_answer_is_a_valid_answer():
+    # The example must itself pass the answer model, or it would teach a broken format.
+    draft = ReformulationDraft.model_validate(json.loads(prompts.EXAMPLE_ANSWER))
+    assert [s.original for s in draft.substitutions] == ["молоко 2.5%", "закваска"]
+
+
+def test_goal_descriptions_are_rendered_into_the_user_message():
+    message = prompts.user_message(REQUEST)
+    assert "'milk'" in message
+    assert "starter cultures" in message
+
+
+async def test_parallel_tool_calls_in_one_turn_use_one_iteration():
+    both_calcs = [*HAPPY[1], *HAPPY[2]]  # two calc_nutrition calls in the same turn
+    result, llm, tools = await run([HAPPY[0], both_calcs, final()])
+
+    assert result.iterations == 3
+    assert [name for name, _ in tools.executed].count("calc_nutrition") == 2
+    assert [e["iteration"] for e in result.trace if e.get("tool") == "calc_nutrition"] == [2, 2]
+    # Both results went back to the model, one tool message per call id.
+    fed_back = [m for m in llm.calls[2] if m.role == "tool" and m.name == "calc_nutrition"]
+    assert [m.tool_call_id for m in fed_back] == [c.id for c in both_calcs]
+
+
+def test_prompt_asks_for_parallel_tool_calls():
+    assert "SAME turn as parallel calls" in prompts.system_prompt()
