@@ -6,24 +6,47 @@ from typing import Any
 import groq
 
 from app.llm.base import (
+    RETRY_STATUSES,
     LLMClient,
     LLMError,
     LLMNotConfiguredError,
     LLMResponse,
     Message,
+    Retry,
     ToolCall,
     ToolSpec,
+    parse_retry_after,
+    with_retries,
 )
 
 TEMPERATURE = 0.2
+
+# gpt-oss on Groq sometimes emits its reasoning as plain text instead of a tool call and
+# Groq answers 400 output_parse_failed. It is random and fails fast, so a quick retry helps.
+# Other 400s are real request errors and are not retried.
+PARSE_FAILED_RETRY_S = 1.0
 
 
 class GroqClient(LLMClient):
     provider = "groq"
 
-    def __init__(self, api_key: str | None, model: str | None, timeout_s: float = 30) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        model: str | None,
+        timeout_s: float = 30,
+        reasoning_effort: str | None = None,
+    ) -> None:
         self._model = model
-        self._client = groq.AsyncGroq(api_key=api_key, timeout=timeout_s) if api_key else None
+        # Less reasoning = fewer tokens against the per-minute quota and fewer parse failures.
+        # Default "low" only for gpt-oss: other models accept different values (Qwen: none).
+        if reasoning_effort is None and model and model.startswith("openai/gpt-oss"):
+            reasoning_effort = "low"
+        self._reasoning = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
+        # max_retries=0: the SDK would otherwise retry silently on its own; we use with_retries.
+        self._client = (
+            groq.AsyncGroq(api_key=api_key, timeout=timeout_s, max_retries=0) if api_key else None
+        )
 
     async def complete(self, messages: list[Message], *, json_output: bool = False) -> str:
         # json_object works on all Groq models; json_schema is limited to a few models.
@@ -69,11 +92,16 @@ class GroqClient(LLMClient):
         if not self._model:
             raise LLMNotConfiguredError("GROQ_MODEL is not set")
         try:
-            response = await self._client.chat.completions.create(
-                model=self._model,
-                messages=[_to_dict(m) for m in messages],
-                temperature=TEMPERATURE,
-                **kwargs,
+            client, payload = self._client, [_to_dict(m) for m in messages]
+            response = await with_retries(
+                lambda: client.chat.completions.create(
+                    model=self._model,
+                    messages=payload,
+                    temperature=TEMPERATURE,
+                    **self._reasoning,
+                    **kwargs,
+                ),
+                _retry_info,
             )
         except groq.RateLimitError as exc:
             raise LLMError(f"groq rate limit: {exc.message}", "llm_rate_limited", 503) from exc
@@ -84,6 +112,23 @@ class GroqClient(LLMClient):
         if not response.choices:
             raise LLMError("groq returned no choices", "llm_bad_response")
         return response.choices[0]
+
+
+def _retry_info(exc: Exception) -> Retry | None:
+    if not isinstance(exc, groq.APIStatusError):
+        return None
+    if exc.status_code in RETRY_STATUSES:
+        retry_after = parse_retry_after(exc.response.headers.get("retry-after"))
+        return Retry(str(exc.status_code), retry_after)
+    if exc.status_code == 400 and _error_code(exc) == "output_parse_failed":
+        return Retry("400 output_parse_failed", PARSE_FAILED_RETRY_S)
+    return None
+
+
+def _error_code(exc: groq.APIStatusError) -> str | None:
+    body = exc.body if isinstance(exc.body, dict) else {}
+    error = body.get("error", body)
+    return error.get("code") if isinstance(error, dict) else None
 
 
 def _to_dict(m: Message) -> dict[str, Any]:

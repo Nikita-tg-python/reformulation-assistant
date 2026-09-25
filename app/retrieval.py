@@ -1,5 +1,6 @@
 """Vector search over chunks in pgvector (cosine distance, hnsw index)."""
 
+import re
 from dataclasses import dataclass
 
 import asyncpg
@@ -40,3 +41,30 @@ async def search_chunks(
         RetrievedChunk(r["doc_id"], r["title"], r["text"], round(float(r["score"]), 4))
         for r in rows
     ]
+
+
+_NUTRIENTS_SECTION = re.compile(r"^## Нутрієнти на 100 г[^\n]*\n(.*?)(?=^## |\Z)", re.M | re.S)
+NUTRIENTS_TEXT_LIMIT = 300
+
+
+async def spec_nutrients(pool: asyncpg.Pool, doc_ids: list[str]) -> dict[str, str]:
+    """The "Нутрієнти на 100 г" section of ingredient specs, as one short line per doc.
+
+    The numbers sit near the end of a spec, often outside the chunk that search returns,
+    so the agent gets them per document instead of hunting for them.
+    """
+    rows = await pool.fetch(
+        "SELECT doc_id, content FROM documents "
+        "WHERE doc_id = ANY($1::text[]) AND doc_type = 'ingredient_spec'",
+        doc_ids,
+    )
+    sections = {}
+    for row in rows:
+        match = _NUTRIENTS_SECTION.search(row["content"])
+        if match:
+            lines = (
+                " ".join(ln.strip().removeprefix("- ").split())
+                for ln in match.group(1).splitlines()
+            )
+            sections[row["doc_id"]] = "; ".join(ln for ln in lines if ln)[:NUTRIENTS_TEXT_LIMIT]
+    return sections

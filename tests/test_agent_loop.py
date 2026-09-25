@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.agent import prompts
-from app.agent.loop import AgentError, AgentTimeoutError, run_agent
+from app.agent.loop import AgentError, AgentTimeoutError, approx_tokens, run_agent
 from app.agent.tools import CalcNutritionArgs, calc_nutrition
 from app.llm.base import LLMError, ToolCall
 from app.llm.fake import FakeLLM
@@ -316,3 +316,126 @@ async def test_vegan_answer_cannot_keep_animal_allergens():
     error = next(e for e in result.trace if e["type"] == "validation_error")
     assert "vegan" in error["error"]
     assert "eggs" in error["error"]
+
+
+def test_compact_answer_format_names_every_field_of_the_answer_model():
+    # The prompt no longer embeds the generated JSON schema; guard against drift.
+    from typing import get_args
+
+    from app.schemas import EUAllergen, NutritionValues, Substitution
+
+    fields = {*ReformulationDraft.model_fields, *Substitution.model_fields}
+    fields |= set(NutritionValues.model_fields) | set(get_args(EUAllergen))
+    missing = {f for f in fields if f not in prompts.ANSWER_FORMAT}
+    assert not missing
+    assert len(prompts.ANSWER_FORMAT) // 4 <= 300  # approx tokens
+
+
+async def test_every_trace_entry_has_history_size():
+    result, llm, _ = await run([*HAPPY, "not json", final()])
+
+    assert all(isinstance(e["history_tokens"], int) for e in result.trace)
+    assert result.trace[0]["history_tokens"] == approx_tokens(llm.calls[0])
+
+
+async def test_older_tool_results_are_sent_compact_latest_in_full():
+    result, llm, _ = await run([*HAPPY, final()])
+
+    # Call 2 sees the search result in full: it is the latest round.
+    latest = llm.calls[1][-1]
+    assert latest.role == "tool"
+    assert '"text"' in latest.content
+    # Calls 3 and 4 get the same search result without chunk text, doc_ids still citable.
+    for later in llm.calls[2:]:
+        search = next(m for m in later if m.role == "tool" and m.name == "search_knowledge_base")
+        assert '"text"' not in search.content
+        assert "SPEC-002" in search.content
+    # Validation still used the full results: the answer citing SPEC-002 was accepted.
+    assert result.answer.substitutions[0].sources == ["SPEC-002", "TRIAL-001"]
+
+
+async def test_one_calc_result_copied_into_before_and_after_is_rejected():
+    # Live bug: the model called calc_nutrition once and used the result for both fields.
+    only_after = [call("calc_nutrition", ingredients=AFTER)]
+    copied = final(before=PER_100G_AFTER)
+    fixed_script = [call("calc_nutrition", ingredients=BEFORE), final()]
+
+    result, _, _ = await run([HAPPY[0], *only_after, copied, *fixed_script])
+
+    error = next(e for e in result.trace if e["type"] == "validation_error")
+    assert "original recipe" in error["error"]
+    assert "800 g" in error["error"]
+    assert result.answer.nutrition_per_100g.before.kcal == 81.4
+
+
+async def test_after_must_come_from_a_different_calc_call():
+    same_twice = final(before=PER_100G_BEFORE)
+    same_twice = json.loads(same_twice)
+    same_twice["nutrition_per_100g"]["after"] = PER_100G_BEFORE
+    with pytest.raises(AgentError) as err:
+        await run(
+            [HAPPY[0], HAPPY[1], json.dumps(same_twice), json.dumps(same_twice)],
+        )
+    errors = [e["error"] for e in err.value.trace if e["type"] == "validation_error"]
+    assert "separate calc_nutrition call" in errors[0]
+
+
+async def test_before_calc_is_recognised_by_grams_even_if_names_are_translated():
+    english = [{**i, "name": f"ingredient {n}"} for n, i in enumerate(BEFORE)]
+    result, _, _ = await run(
+        [HAPPY[0], call("calc_nutrition", ingredients=english), HAPPY[2], final()]
+    )
+    assert result.answer.nutrition_per_100g.before.kcal == 81.4
+
+
+async def test_calc_with_ingredients_without_nutrients_is_rejected():
+    # Live bug: calc_nutrition with {} for every ingredient gave zeros that passed.
+    empty_before = [{**i, "nutrients_per_100g": {}} for i in BEFORE]
+    zeros = calc_nutrition(CalcNutritionArgs(ingredients=empty_before).ingredients)["per_100g"]
+    script = [
+        HAPPY[0],
+        call("calc_nutrition", ingredients=empty_before),
+        HAPPY[2],
+        final(before=zeros),
+        HAPPY[1],
+        final(),
+    ]
+    result, _, _ = await run(script, max_iterations=8)
+
+    error = next(e for e in result.trace if e["type"] == "validation_error")
+    assert "no nutrients for" in error["error"]
+    assert "молоко 2.5%" in error["error"]
+    assert result.answer.nutrition_per_100g.before.kcal == 81.4
+
+
+async def test_partially_missing_nutrients_are_accepted():
+    partial = [dict(BEFORE[0], nutrients_per_100g={"kcal": 52}), *BEFORE[1:]]
+    per_100g = calc_nutrition(CalcNutritionArgs(ingredients=partial).ingredients)["per_100g"]
+    result, _, _ = await run(
+        [HAPPY[0], call("calc_nutrition", ingredients=partial), HAPPY[2], final(before=per_100g)]
+    )
+    assert result.answer.nutrition_per_100g.before.model_dump() == per_100g
+
+
+async def test_two_data_less_calcs_get_the_missing_data_message_not_the_separation_one():
+    # Live bug: both calls had {} nutrients, both gave zeros, and the model was told
+    # "after must be a separate call" instead of what was actually wrong.
+    empty_before = [{**i, "nutrients_per_100g": {}} for i in BEFORE]
+    empty_after = [{**i, "nutrients_per_100g": {}} for i in AFTER]
+    zeros = calc_nutrition(CalcNutritionArgs(ingredients=empty_before).ingredients)["per_100g"]
+    script = [
+        HAPPY[0],
+        call("calc_nutrition", ingredients=empty_before),
+        call("calc_nutrition", ingredients=empty_after),
+        final(nutrition_per_100g={"before": zeros, "after": zeros}),
+    ]
+    with pytest.raises(AgentError) as err:
+        await run([*script, script[-1]])
+
+    first_error = next(e["error"] for e in err.value.trace if e["type"] == "validation_error")
+    assert "no nutrients for" in first_error
+    assert "nutrients_per_100g from search_knowledge_base" in first_error
+
+
+def test_owner_notes_are_not_sent_to_the_model():
+    assert "TODO" not in prompts.system_prompt()

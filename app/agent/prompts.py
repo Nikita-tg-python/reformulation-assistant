@@ -6,9 +6,7 @@ the domain guidance and the examples are deliberately left for a human to write.
 Places marked TODO(owner) matter most for answer quality.
 """
 
-import json
-
-from app.schemas import ReformulateRequest, ReformulationDraft
+from app.schemas import ReformulateRequest
 
 GOAL_DESCRIPTIONS = {
     # TODO(owner): say what "done" means for each goal in R&D terms.
@@ -35,12 +33,28 @@ Rules:
 allergens_after lists every EU allergen of the new recipe, including the allergens of any
 Open Food Facts product you cite (the code checks this).
 
-TODO(owner): domain guidance, e.g. check starter cultures and other hidden sources of the
-allergen, do not introduce a new EU allergen without a warning, what to put in warnings.
-TODO(owner): a short worked example of a good answer.
+{answer_format}"""
+# TODO(owner): add to SYSTEM_PROMPT domain guidance, e.g. check starter cultures and other
+# hidden sources of the allergen, do not introduce a new EU allergen without a warning,
+# what to put in warnings. (Kept out of the prompt text: it is resent on every call.)
+# TODO(owner): add a short worked example of a good answer.
 
-Final answer JSON schema:
-{schema}
+# Hand-written instead of ReformulationDraft.model_json_schema(): the generated schema is
+# ~2.7k characters and is resent on every iteration. Pydantic still validates the answer;
+# tests/test_agent_loop.py checks that every field of the model is named here.
+ANSWER_FORMAT = """Final answer: one JSON object, nothing else.
+{
+  "substitutions": [{
+    "original": str, "replacement": str, "grams": number >= 0, "rationale": str,
+    "sources": [doc_id or OFF source_id], "confidence": "high" | "medium" | "low"
+  }],
+  "allergens_before": [code], "allergens_after": [code],
+  "nutrition_per_100g": {"before": N, "after": N},
+  "warnings": [str]
+}
+N = {"kcal", "protein_g", "fat_g", "carbs_g", "sugar_g"}: numbers from calc_nutrition per_100g.
+code: gluten crustaceans eggs fish peanuts soybeans milk nuts celery mustard sesame sulphites
+lupin molluscs.
 """
 
 FORCE_FINAL_MESSAGE = (
@@ -54,8 +68,7 @@ VALIDATION_RETRY_MESSAGE = (
 
 
 def system_prompt() -> str:
-    schema = json.dumps(ReformulationDraft.model_json_schema(), ensure_ascii=False)
-    return SYSTEM_PROMPT.format(schema=schema)
+    return SYSTEM_PROMPT.format(answer_format=ANSWER_FORMAT)
 
 
 def user_message(request: ReformulateRequest) -> str:

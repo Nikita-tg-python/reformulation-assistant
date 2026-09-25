@@ -4,13 +4,17 @@ from google import genai
 from google.genai import errors, types
 
 from app.llm.base import (
+    RETRY_STATUSES,
     LLMClient,
     LLMError,
     LLMNotConfiguredError,
     LLMResponse,
     Message,
+    Retry,
     ToolCall,
     ToolSpec,
+    parse_retry_after,
+    with_retries,
 )
 
 TEMPERATURE = 0.2
@@ -82,8 +86,12 @@ class GeminiClient(LLMClient):
         if not self._model:
             raise LLMNotConfiguredError("GEMINI_MODEL is not set")
         try:
-            response = await self._client.aio.models.generate_content(
-                model=self._model, contents=_to_contents(messages), config=config
+            client, contents = self._client, _to_contents(messages)
+            response = await with_retries(
+                lambda: client.aio.models.generate_content(
+                    model=self._model, contents=contents, config=config
+                ),
+                _retry_info,
             )
         except errors.APIError as exc:
             if exc.code == 429:
@@ -99,6 +107,25 @@ class GeminiClient(LLMClient):
             )
             raise LLMError(f"gemini returned no content ({reason})", "llm_bad_response")
         return response
+
+
+def _retry_info(exc: Exception) -> Retry | None:
+    if not isinstance(exc, errors.APIError) or exc.code not in RETRY_STATUSES:
+        return None
+    headers = getattr(exc.response, "headers", None) or {}
+    retry_after = parse_retry_after(headers.get("retry-after"))
+    if retry_after is None:
+        retry_after = _retry_delay_from_body(exc.details)
+    return Retry(str(exc.code), retry_after)
+
+
+def _retry_delay_from_body(details: object) -> float | None:
+    """Gemini sends the wait in the body: error.details[] item google.rpc.RetryInfo."""
+    items = details.get("error", {}).get("details", []) if isinstance(details, dict) else []
+    for item in items:
+        if isinstance(item, dict) and str(item.get("@type", "")).endswith("RetryInfo"):
+            return parse_retry_after(item.get("retryDelay"))
+    return None
 
 
 def _text(response: types.GenerateContentResponse) -> str:

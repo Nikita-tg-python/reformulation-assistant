@@ -15,11 +15,20 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.embeddings import Embedder
 from app.llm.base import ToolSpec
-from app.retrieval import search_chunks
+from app.retrieval import search_chunks, spec_nutrients
 
 logger = logging.getLogger(__name__)
 
 NUTRIENTS = ("kcal", "protein_g", "fat_g", "carbs_g", "sugar_g")
+
+# Chunk text sent back to the model is cut to keep the history inside free-tier token limits
+# (Groq: 8000 tokens/min). The trace keeps the full call; only the model's copy is shortened.
+KB_TEXT_LIMIT = 500
+KB_DEFAULT_TOP_K = 3
+# 3 distinct documents carry what 5 chunks used to (those were 3 docs with duplicates),
+# at ~60% of the tokens. The model asked for the maximum every time, so the cap matters.
+KB_MAX_TOP_K = 3
+KB_CHUNKS_PER_RESULT = 3  # chunks fetched per requested document before de-duplication
 
 OFF_SEARCH_URL = "https://search.openfoodfacts.org/search"  # Open Food Facts full-text search
 OFF_TIMEOUT_S = 5.0
@@ -56,7 +65,7 @@ _OFF_ALLERGENS = {
 
 class SearchKnowledgeBaseArgs(BaseModel):
     query: str = Field(min_length=1, max_length=500)
-    top_k: int = Field(default=5, ge=1, le=10)
+    top_k: int = Field(default=KB_DEFAULT_TOP_K, ge=1, le=KB_MAX_TOP_K)
 
 
 class LookupProductArgs(BaseModel):
@@ -76,25 +85,27 @@ class CalcNutritionArgs(BaseModel):
 
 # ---------- JSON schemas for tool calling ----------
 
-_NUTRIENTS_SCHEMA = {
-    "type": "object",
-    "description": "Nutrients per 100 g of this ingredient",
-    "properties": {n: {"type": "number"} for n in NUTRIENTS},
-}
+# Descriptions are kept short on purpose: the schemas are resent with every LLM call.
+_NUTRIENTS_SCHEMA = {"type": "object", "properties": {n: {"type": "number"} for n in NUTRIENTS}}
 
 TOOL_SPECS = [
     ToolSpec(
         name="search_knowledge_base",
         description=(
-            "Search internal R&D documents (ingredient specs, trial reports, guidelines) "
-            "by meaning. Use first: internal documents take priority over external data. "
-            "Returns chunks with doc_id, title, text and similarity score."
+            "Search internal R&D docs (specs, trial reports, guidelines). Use first. "
+            "Returns up to top_k documents: doc_id, title, best-matching text, score, and "
+            "for ingredient specs nutrients_per_100g: use these numbers in calc_nutrition."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "What to look for, in plain words"},
-                "top_k": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+                "query": {"type": "string"},
+                "top_k": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": KB_MAX_TOP_K,
+                    "default": KB_DEFAULT_TOP_K,
+                },
             },
             "required": ["query"],
         },
@@ -102,25 +113,20 @@ TOOL_SPECS = [
     ToolSpec(
         name="lookup_product",
         description=(
-            "Look up a food product in Open Food Facts by name. Returns nutrients per 100 g, "
-            "allergens and ingredients of the first matching product with nutrition data. "
-            "Use when the knowledge base has no data for an ingredient. "
-            "Prefer English product names: Open Food Facts data is mostly English/French."
+            "Open Food Facts product by English name: nutrients per 100 g, allergens. "
+            "Only when the knowledge base has no data."
         ),
         parameters={
             "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Product name, e.g. 'coconut milk'"}
-            },
+            "properties": {"name": {"type": "string"}},
             "required": ["name"],
         },
     ),
     ToolSpec(
         name="calc_nutrition",
         description=(
-            "Compute kcal, protein_g, fat_g, carbs_g, sugar_g per 100 g of the finished "
-            "product as the mass-weighted average of its ingredients. Always use this "
-            "for nutrition numbers, never calculate them yourself."
+            "Nutrition per 100 g of the finished product (mass-weighted average). "
+            "Always use it for nutrition numbers."
         ),
         parameters={
             "type": "object",
@@ -210,14 +216,31 @@ class AgentTools:
             return _error("invalid_arguments", _describe(exc))
         return _error("unknown_tool", f"no tool named {name!r}")
 
-    async def search_knowledge_base(self, query: str, top_k: int = 5) -> dict[str, Any]:
-        chunks = await search_chunks(self._pool, self._embedder, query, top_k)
-        return {
-            "results": [
-                {"doc_id": c.doc_id, "title": c.title, "text": c.text, "score": c.score}
-                for c in chunks
-            ]
-        }
+    async def search_knowledge_base(
+        self, query: str, top_k: int = KB_DEFAULT_TOP_K
+    ) -> dict[str, Any]:
+        # One result per document: a second chunk of the same doc costs ~200 tokens and
+        # rarely adds anything. Fetch extra chunks so top_k still means top_k documents.
+        chunks = await search_chunks(
+            self._pool, self._embedder, query, top_k * KB_CHUNKS_PER_RESULT
+        )
+        best: dict[str, Any] = {}
+        for c in chunks:  # already ordered by score
+            if c.doc_id not in best and len(best) < top_k:
+                best[c.doc_id] = c
+        nutrients = await spec_nutrients(self._pool, sorted(best))
+        results = []
+        for c in best.values():
+            item = {
+                "doc_id": c.doc_id,
+                "title": c.title,
+                "text": _shorten(c.text, KB_TEXT_LIMIT),
+                "score": c.score,
+            }
+            if c.doc_id in nutrients:
+                item["nutrients_per_100g"] = nutrients[c.doc_id]
+            results.append(item)
+        return {"results": results}
 
     async def lookup_product(self, name: str) -> dict[str, Any]:
         key = " ".join(name.lower().split())
@@ -296,6 +319,30 @@ def _name_matches(query: str, product_name: str) -> bool:
     return 2 * matched > len(words)
 
 
+def compact_result(tool: str, result: dict[str, Any]) -> dict[str, Any]:
+    """What the model keeps of a tool result after it has seen it once in full.
+
+    Older results are resent on every later call; the full chunk text is what blows the
+    token budget. Sources stay citable (doc_id, source_id) and numbers stay available.
+    """
+    if "error" in result:
+        return result
+    if tool == "search_knowledge_base":
+        return {
+            "results": [
+                {k: r[k] for k in ("doc_id", "title", "score", "nutrients_per_100g") if k in r}
+                for r in result.get("results", [])
+            ],
+            "note": "text shown earlier, omitted",
+        }
+    if tool == "lookup_product" and result.get("found"):
+        keep = ("source_id", "product_name", "nutrients_per_100g", "allergens")
+        return {"found": True, **{k: result.get(k) for k in keep}}
+    if tool == "calc_nutrition":
+        return {"per_100g": result.get("per_100g"), "warnings": result.get("warnings")}
+    return result
+
+
 def _nutrients(product: dict[str, Any]) -> dict[str, float]:
     nutriments = product.get("nutriments") or {}
     return {
@@ -303,6 +350,10 @@ def _nutrients(product: dict[str, Any]) -> dict[str, float]:
         for ours, off in _OFF_NUTRIMENTS.items()
         if isinstance(nutriments.get(off), int | float)
     }
+
+
+def _shorten(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _error(code: str, message: str) -> dict[str, Any]:

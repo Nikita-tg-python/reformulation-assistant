@@ -13,5 +13,9 @@ def create_llm_client(settings: Settings) -> LLMClient:
     if settings.llm_provider == "gemini":
         return GeminiClient(secret(settings.gemini_api_key), settings.gemini_model)
     if settings.llm_provider == "groq":
-        return GroqClient(secret(settings.groq_api_key), settings.groq_model)
+        return GroqClient(
+            secret(settings.groq_api_key),
+            settings.groq_model,
+            reasoning_effort=settings.groq_reasoning_effort,
+        )
     raise ValueError(f"unknown LLM_PROVIDER: {settings.llm_provider}")

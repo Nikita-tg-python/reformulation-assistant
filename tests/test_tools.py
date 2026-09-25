@@ -158,3 +158,97 @@ async def test_execute_rejects_unknown_tools_and_bad_arguments():
     assert "query" in bad["error"]["message"]
     assert "top_k" in bad["error"]["message"]
     assert (await tools.execute("lookup_product", {}))["error"]["code"] == "invalid_arguments"
+
+
+async def test_search_knowledge_base_shortens_text_for_the_model():
+    long = {"doc_id": "SPEC-001", "title": "Молоко", "text": "а" * 1200, "score": 0.9}
+    tools = AgentTools(FakePool(chunks=[long]), FakeEmbedder())
+
+    result = await tools.execute("search_knowledge_base", {"query": "молоко"})
+
+    text = result["results"][0]["text"]
+    assert len(text) == 500
+    assert text.endswith("…")
+
+
+async def test_search_knowledge_base_top_k_defaults_to_3_and_is_capped_at_3():
+    chunks = [
+        {"doc_id": f"SPEC-00{i}", "title": "t", "text": "x", "score": 1 - i / 10} for i in range(8)
+    ]
+    tools = AgentTools(FakePool(chunks=chunks), FakeEmbedder())
+
+    default = await tools.execute("search_knowledge_base", {"query": "x"})
+    too_many = await tools.execute("search_knowledge_base", {"query": "x", "top_k": 4})
+
+    assert len(default["results"]) == 3
+    assert too_many["error"]["code"] == "invalid_arguments"
+
+
+SPEC = """# Кокосове молоко
+
+## Функція в продукті
+Основа для йогурту.
+
+## Нутрієнти на 100 г
+
+- kcal: 28
+- protein_g: 0.2
+- fat_g: 2.5
+
+## Чим можна замінити
+Соєвий напій.
+"""
+
+
+async def test_search_results_carry_spec_nutrients():
+    chunks = [
+        {"doc_id": "SPEC-002", "title": "Кокос", "text": "перший чанк", "score": 0.9},
+        {"doc_id": "SPEC-002", "title": "Кокос", "text": "другий чанк", "score": 0.8},
+        {"doc_id": "TRIAL-001", "title": "Проба", "text": "звіт", "score": 0.7},
+    ]
+    pool = FakePool(chunks=chunks, documents={"SPEC-002": SPEC})
+    tools = AgentTools(pool, FakeEmbedder())
+
+    results = (await tools.execute("search_knowledge_base", {"query": "кокос"}))["results"]
+
+    assert [r["doc_id"] for r in results] == ["SPEC-002", "TRIAL-001"]  # one per document
+    assert results[0]["nutrients_per_100g"] == "kcal: 28; protein_g: 0.2; fat_g: 2.5"
+    assert "nutrients_per_100g" not in results[1]  # not an ingredient spec
+
+
+def test_compact_search_result_keeps_nutrients_drops_text():
+    from app.agent.tools import compact_result
+
+    full = {
+        "results": [
+            {"doc_id": "SPEC-002", "title": "t", "text": "long", "score": 0.9,
+             "nutrients_per_100g": "kcal: 28"},
+        ]
+    }  # fmt: skip
+    compact = compact_result("search_knowledge_base", full)["results"][0]
+    assert compact == {
+        "doc_id": "SPEC-002",
+        "title": "t",
+        "score": 0.9,
+        "nutrients_per_100g": "kcal: 28",
+    }
+
+
+async def test_search_returns_one_result_per_document():
+    chunks = [
+        {"doc_id": "SPEC-009", "title": "Закваска", "text": "a", "score": 0.95},
+        {"doc_id": "SPEC-009", "title": "Закваска", "text": "b", "score": 0.94},
+        {"doc_id": "SPEC-002", "title": "Кокос", "text": "c", "score": 0.93},
+        {"doc_id": "SPEC-002", "title": "Кокос", "text": "d", "score": 0.92},
+        {"doc_id": "TRIAL-001", "title": "Проба", "text": "e", "score": 0.91},
+        {"doc_id": "GUIDE-001", "title": "Алергени", "text": "f", "score": 0.90},
+    ]
+    tools = AgentTools(FakePool(chunks=chunks), FakeEmbedder())
+
+    results = (await tools.execute("search_knowledge_base", {"query": "x", "top_k": 3}))["results"]
+
+    assert [(r["doc_id"], r["text"]) for r in results] == [
+        ("SPEC-009", "a"),
+        ("SPEC-002", "c"),
+        ("TRIAL-001", "e"),
+    ]

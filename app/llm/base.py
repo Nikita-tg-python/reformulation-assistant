@@ -1,10 +1,21 @@
 """Provider-neutral LLM interface. Everything outside app/llm/ talks only to LLMClient."""
 
+import asyncio
+import logging
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from app.errors import AppError
+
+logger = logging.getLogger(__name__)
+
+# Retry policy for provider calls. Providers decide which errors are retryable (see
+# `Retry`): rate limit (429), overload (503) and, on Groq, 400 output_parse_failed.
+RETRY_STATUSES = frozenset({429, 503})
+RETRY_DELAYS_S = (2.0, 5.0)  # one pause per retry: at most 2 retries
+MAX_RETRY_AFTER_S = 30.0  # never wait longer than this, whatever the provider asks
 
 Role = Literal["system", "user", "assistant", "tool"]
 
@@ -66,3 +77,52 @@ class LLMClient(ABC):
         self, messages: list[Message], tools: list[ToolSpec]
     ) -> LLMResponse:
         """One model turn that may request tool calls. The caller runs the tools and loops."""
+
+
+@dataclass(frozen=True)
+class Retry:
+    """A provider error worth retrying."""
+
+    reason: str  # for the log, e.g. "429" or "400 output_parse_failed"
+    after_s: float | None = None  # wait asked by the provider; None -> RETRY_DELAYS_S
+
+
+async def with_retries[T](
+    call: Callable[[], Awaitable[T]],
+    classify: Callable[[Exception], Retry | None],
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> T:
+    """Run `call`, retrying up to len(RETRY_DELAYS_S) times when `classify(exc)` says so.
+
+    `classify` returns a `Retry` for a retryable provider error and None for anything
+    else; non-retryable errors are raised at once, the last attempt's error propagates.
+    """
+    for attempt, delay in enumerate(RETRY_DELAYS_S):
+        try:
+            return await call()
+        except Exception as exc:
+            retry = classify(exc)
+            if retry is None:
+                raise
+            wait = min(retry.after_s, MAX_RETRY_AFTER_S) if retry.after_s is not None else delay
+            logger.warning(
+                "llm provider returned %s, retry %d/%d in %.1f s",
+                retry.reason,
+                attempt + 1,
+                len(RETRY_DELAYS_S),
+                wait,
+            )
+            await sleep(wait)
+    return await call()
+
+
+def parse_retry_after(value: object) -> float | None:
+    """Seconds from a Retry-After value ("7", "1.5", "54s"); None if absent or not seconds."""
+    if value is None:
+        return None
+    try:
+        seconds = float(str(value).strip().removesuffix("s"))
+    except ValueError:
+        return None  # HTTP-date form: fall back to the fixed pause
+    return seconds if seconds >= 0 else None

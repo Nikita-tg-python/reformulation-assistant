@@ -8,13 +8,13 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from pydantic import ValidationError
 
 from app.agent import prompts
-from app.agent.tools import NUTRIENTS, TOOL_SPECS
+from app.agent.tools import NUTRIENTS, TOOL_SPECS, compact_result
 from app.errors import AppError
 from app.llm.base import LLMClient, LLMError, Message, ToolCall
 from app.schemas import NutritionValues, ReformulateRequest, ReformulationDraft
@@ -86,9 +86,12 @@ async def _loop(
     last_call: tuple[str, str] | None = None
     final_only = False  # set by the loop guard: tools are no longer executed
     retried = False
+    compact: dict[int, str] = {}  # index in messages -> shortened tool result for later calls
 
     for iteration in range(1, max_iterations + 1):
-        response = await llm.complete_with_tools(messages, TOOL_SPECS)
+        sent = _history_for_call(messages, compact)
+        tokens = approx_tokens(sent)  # what this call sends: where the provider limit bites
+        response = await llm.complete_with_tools(sent, TOOL_SPECS)
         messages.append(response.message)
 
         if response.tool_calls:
@@ -96,16 +99,17 @@ async def _loop(
                 signature = (call.name, json.dumps(call.arguments, sort_keys=True))
                 if final_only or signature == last_call:
                     final_only = True
-                    result = _skipped(call, trace, iteration)
+                    result = _skipped(call, trace, iteration, tokens)
                 else:
                     result = await tools.execute(call.name, call.arguments)
-                    evidence.add(call.name, result)
-                    _record(trace, _trace_call(iteration, call, result))
+                    evidence.add(call.name, call.arguments, result)
+                    _record(trace, _trace_call(iteration, call, result), tokens)
                 last_call = signature
+                compact[len(messages)] = _to_json(compact_result(call.name, result))
                 messages.append(
                     Message(
                         "tool",
-                        json.dumps(result, ensure_ascii=False),
+                        _to_json(result),
                         tool_call_id=call.id,
                         name=call.name,
                     )
@@ -118,7 +122,11 @@ async def _loop(
             answer = _parse_final(response.text or "", evidence, request)
         except (ValueError, ValidationError) as exc:
             error = _describe(exc)
-            _record(trace, {"type": "validation_error", "iteration": iteration, "error": error})
+            _record(
+                trace,
+                {"type": "validation_error", "iteration": iteration, "error": error},
+                tokens,
+            )
             if retried:
                 raise AgentError(
                     502, "agent_invalid_output", f"invalid final answer: {error}", trace
@@ -126,10 +134,17 @@ async def _loop(
             retried = True
             messages.append(Message("user", prompts.VALIDATION_RETRY_MESSAGE.format(error=error)))
             continue
-        _record(trace, {"type": "final_answer", "iteration": iteration})
+        _record(trace, {"type": "final_answer", "iteration": iteration}, tokens)
         return AgentResult(answer=answer, trace=trace, iterations=iteration)
 
     raise AgentTimeoutError(f"no final answer after {max_iterations} iterations", trace)
+
+
+@dataclass(frozen=True)
+class _CalcCall:
+    grams: list[float]
+    per_100g: dict[str, float | None]
+    without_data: list[str]  # ingredient names with grams > 0 and no nutrients
 
 
 class _Evidence:
@@ -137,17 +152,33 @@ class _Evidence:
 
     def __init__(self) -> None:
         self.sources: set[str] = set()
-        self.nutrition: list[dict[str, float | None]] = []
+        # One entry per successful calc_nutrition call.
+        self.nutrition: list[_CalcCall] = []
         self.product_allergens: dict[str, set[str]] = {}  # OFF source_id -> EU allergen codes
 
-    def add(self, tool: str, result: dict[str, Any]) -> None:
+    def add(self, tool: str, arguments: dict[str, Any], result: dict[str, Any]) -> None:
         if tool == "search_knowledge_base":
             self.sources |= {r["doc_id"] for r in result.get("results", [])}
         elif tool == "lookup_product" and result.get("found"):
             self.sources.add(result["source_id"])
             self.product_allergens[result["source_id"]] = set(result.get("allergens") or [])
         elif tool == "calc_nutrition" and "per_100g" in result:
-            self.nutrition.append(result["per_100g"])
+            ingredients = arguments.get("ingredients", [])
+            self.nutrition.append(
+                _CalcCall(
+                    grams=[float(i.get("grams", 0)) for i in ingredients],
+                    per_100g=result["per_100g"],
+                    # Ingredients sent with no nutrient at all: they count as 0 in the result.
+                    without_data=[
+                        str(i.get("name"))
+                        for i in ingredients
+                        if float(i.get("grams", 0)) > 0
+                        and not any(
+                            v is not None for v in (i.get("nutrients_per_100g") or {}).values()
+                        )
+                    ],
+                )
+            )
 
 
 # EU allergens of animal origin: cannot remain in a vegan recipe.
@@ -168,13 +199,7 @@ def _parse_final(text: str, evidence: _Evidence, request: ReformulateRequest) ->
         raise ValueError(
             f"sources {sorted(unknown)} were not returned by any tool call in this run"
         )
-    for label in ("before", "after"):
-        values = getattr(answer.nutrition_per_100g, label)
-        if not any(_same_nutrition(values, calc) for calc in evidence.nutrition):
-            raise ValueError(
-                f"nutrition_per_100g.{label} does not match any calc_nutrition result: "
-                "call calc_nutrition and copy its per_100g values"
-            )
+    _check_nutrition(answer, evidence, request)
     _check_allergens(answer, evidence, request)
     return answer
 
@@ -204,6 +229,56 @@ def _check_allergens(
         )
 
 
+def _check_nutrition(
+    answer: ReformulationDraft, evidence: _Evidence, request: ReformulateRequest
+) -> None:
+    """ "before" = calc_nutrition on the original recipe, "after" = a different calc call.
+
+    The original recipe is recognised by its ingredient grams (the model may rename
+    ingredients, e.g. translate them). Without this, one calc result copied into both
+    fields would pass: it did in a live run.
+    """
+    original = _grams_key(i.grams for i in request.ingredients)
+    before, after = answer.nutrition_per_100g.before, answer.nutrition_per_100g.after
+    before_calls = {
+        n
+        for n, c in enumerate(evidence.nutrition)
+        if _grams_key(c.grams) == original and _same_nutrition(before, c.per_100g)
+    }
+    if not before_calls:
+        recipe = ", ".join(f"{g:g} g" for g in original)
+        raise ValueError(
+            "nutrition_per_100g.before must be the per_100g of a calc_nutrition call on the "
+            f"original recipe (same ingredient grams: {recipe})"
+        )
+    # Missing data is checked before the "separate call" rule: it is the real problem
+    # when two data-less calls both give zeros, and the message tells the model what to fix.
+    _require_data("before", before_calls, evidence)
+    after_any = {n for n, c in enumerate(evidence.nutrition) if _same_nutrition(after, c.per_100g)}
+    if after_any:
+        _require_data("after", after_any, evidence)
+    if not after_any - before_calls:
+        raise ValueError(
+            "nutrition_per_100g.after must be the per_100g of a separate calc_nutrition call "
+            "on the new recipe, not the call used for before"
+        )
+
+
+def _require_data(label: str, calls: set[int], evidence: _Evidence) -> None:
+    """Zeros from ingredients sent without any nutrient are not nutrition data."""
+    if all(evidence.nutrition[n].without_data for n in calls):
+        names = ", ".join(evidence.nutrition[min(calls)].without_data)
+        raise ValueError(
+            f"nutrition_per_100g.{label} comes from calc_nutrition with no nutrients for: "
+            f"{names}. Use nutrients_per_100g from search_knowledge_base results (or "
+            "lookup_product), then call calc_nutrition again"
+        )
+
+
+def _grams_key(grams: Any) -> list[float]:
+    return sorted(round(float(g), 1) for g in grams)
+
+
 def _same_nutrition(values: NutritionValues, calc: dict[str, float | None]) -> bool:
     given = {n: v for n in NUTRIENTS if (v := getattr(values, n)) is not None}
     return bool(given) and all(
@@ -211,15 +286,50 @@ def _same_nutrition(values: NutritionValues, calc: dict[str, float | None]) -> b
     )
 
 
-def _record(trace: Trace, entry: dict[str, Any]) -> None:
+def _to_json(data: Any) -> str:
+    """Compact JSON for the model: no spaces after separators, non-ASCII kept as is."""
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _history_for_call(messages: list[Message], compact: dict[int, str]) -> list[Message]:
+    """Messages to send: tool results from earlier rounds are replaced by their compact form.
+
+    The latest round (tool results after the last assistant turn) goes in full, so the model
+    reads each result completely once. The full results stay in `messages` and in the
+    evidence used for validation.
+    """
+    last_assistant = max((i for i, m in enumerate(messages) if m.role == "assistant"), default=-1)
+    return [
+        replace(m, content=compact[i]) if i in compact and i < last_assistant else m
+        for i, m in enumerate(messages)
+    ]
+
+
+def approx_tokens(messages: list[Message]) -> int:
+    """Rough size of the message history in tokens: characters / 4.
+
+    Counts message text and tool-call arguments; the tool schemas sent with every call
+    are not included.
+    """
+    chars = 0
+    for m in messages:
+        chars += len(m.content)
+        for c in m.tool_calls:
+            chars += len(c.name) + len(json.dumps(c.arguments, ensure_ascii=False))
+    return chars // 4
+
+
+def _record(trace: Trace, entry: dict[str, Any], history_tokens: int) -> None:
     """Append to the trace and mirror it into the JSON logs (request_id is added there)."""
+    entry["history_tokens"] = history_tokens
     trace.append(entry)
-    fields = {k: entry[k] for k in ("iteration", "tool", "call", "skipped", "error") if k in entry}
+    keys = ("iteration", "tool", "call", "skipped", "error", "history_tokens")
+    fields = {k: entry[k] for k in keys if k in entry}
     logger.info("agent %s", entry["type"], extra={"agent_" + k: v for k, v in fields.items()})
 
 
-def _skipped(call: ToolCall, trace: Trace, iteration: int) -> dict[str, Any]:
-    _record(trace, {**_trace_call(iteration, call, None), "skipped": "repeated_call"})
+def _skipped(call: ToolCall, trace: Trace, iteration: int, tokens: int) -> dict[str, Any]:
+    _record(trace, {**_trace_call(iteration, call, None), "skipped": "repeated_call"}, tokens)
     return {
         "error": {
             "code": "final_answer_required",

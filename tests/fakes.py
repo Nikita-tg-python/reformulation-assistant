@@ -59,9 +59,15 @@ class _Acquire:
 class FakePool:
     """Answers only the queries /health, /ask and search_knowledge_base make."""
 
-    def __init__(self, chunks: list[dict[str, Any]] | None = None, healthy: bool = True) -> None:
+    def __init__(
+        self,
+        chunks: list[dict[str, Any]] | None = None,
+        healthy: bool = True,
+        documents: dict[str, str] | None = None,
+    ) -> None:
         self.chunks = chunks or []  # dicts with doc_id, title, text, score
         self.healthy = healthy
+        self.documents = documents or {}  # ingredient_spec doc_id -> content
 
     def acquire(self, **kwargs: Any) -> _Acquire:
         return _Acquire(self)
@@ -74,5 +80,7 @@ class FakePool:
         raise AssertionError(f"FakePool: unexpected query {query!r}")
 
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        if "FROM documents" in query:  # retrieval.spec_nutrients
+            return [{"doc_id": d, "content": c} for d, c in self.documents.items() if d in args[0]]
         top_k = args[1]
         return sorted(self.chunks, key=lambda c: -c["score"])[:top_k]

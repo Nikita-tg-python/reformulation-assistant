@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     gemini_model: str | None = None
     groq_api_key: SecretStr | None = None
     groq_model: str | None = None
+    # None = automatic: "low" for openai/gpt-oss-*, not sent for other models.
+    groq_reasoning_effort: Literal["none", "default", "low", "medium", "high"] | None = None
 
     # Deviation from spec (all-MiniLM-L6-v2): the corpus is Ukrainian, see .env.example.
     embedding_model: str = "intfloat/multilingual-e5-small"
