@@ -13,6 +13,7 @@ from app.llm.base import (
     Retry,
     ToolCall,
     ToolSpec,
+    api_key_problem,
     parse_retry_after,
     with_retries,
 )
@@ -25,12 +26,13 @@ class GeminiClient(LLMClient):
 
     def __init__(self, api_key: str | None, model: str | None, timeout_s: float = 30) -> None:
         self._model = model
+        self._key_problem = api_key_problem("GEMINI_API_KEY", api_key)
         # Build the SDK client only with a key: the app must start (and /health work) without one.
         self._client = (
             genai.Client(
                 api_key=api_key, http_options=types.HttpOptions(timeout=int(timeout_s * 1000))
             )
-            if api_key
+            if api_key and not self._key_problem
             else None
         )
 
@@ -81,6 +83,8 @@ class GeminiClient(LLMClient):
     async def _generate(
         self, messages: list[Message], config: types.GenerateContentConfig
     ) -> types.GenerateContentResponse:
+        if self._key_problem:
+            raise LLMNotConfiguredError(self._key_problem)
         if self._client is None:
             raise LLMNotConfiguredError("GEMINI_API_KEY is not set")
         if not self._model:

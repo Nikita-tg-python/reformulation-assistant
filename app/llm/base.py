@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import unicodedata
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -126,3 +127,16 @@ def parse_retry_after(value: object) -> float | None:
     except ValueError:
         return None  # HTTP-date form: fall back to the fixed pause
     return seconds if seconds >= 0 else None
+
+
+def api_key_problem(env_name: str, key: str | None) -> str | None:
+    """A key with a stray non-ASCII or blank character breaks every HTTP request (headers are
+    ASCII) with an opaque encoding error; report it clearly instead."""
+    for position, char in enumerate(key or ""):
+        if not char.isascii() or not char.isprintable() or char.isspace():
+            name = unicodedata.name(char, repr(char))
+            return (
+                f"{env_name} contains an invalid character at position {position} ({name}): "
+                "check the keyboard layout and stray spaces"
+            )
+    return None

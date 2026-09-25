@@ -304,3 +304,83 @@ async def test_reformulate_records_successful_and_timed_out_runs(make_client, db
         ("agent_timeout", "run-loop", 6, "remove_allergen"),
     ]
     assert all(r["duration_ms"] is not None for r in rows)
+
+
+async def test_reformulate_uses_the_pipeline_when_agent_mode_is_pipeline(make_client, monkeypatch):
+    from app.agent.tools import CalcNutritionArgs, calc_nutrition
+    from app.config import Settings
+    from app.routers import reformulate as reformulate_router
+
+    monkeypatch.setattr(reformulate_router, "get_settings", lambda: Settings(agent_mode="pipeline"))
+    milk = {"kcal": 52, "protein_g": 2.8, "fat_g": 2.5, "carbs_g": 4.7, "sugar_g": 4.7}
+    soy = {"kcal": 34, "protein_g": 3.3, "fat_g": 1.9, "carbs_g": 0.6, "sugar_g": 0.3}
+    spec = (
+        "## Нутрієнти на 100 г\n\n- kcal: {kcal}\n- protein_g: {protein_g}\n- fat_g: {fat_g}\n"
+        "- carbs_g: {carbs_g}\n- sugar_g: {sugar_g}\n"
+    )
+    pool = FakePool(
+        chunks=[
+            {
+                "doc_id": "SPEC-004",
+                "title": "Соєвий напій",
+                "text": "Соя для йогурту.",
+                "score": 0.9,
+            },
+            {"doc_id": "SPEC-001", "title": "Молоко", "text": "Молоко 2.5%.", "score": 0.8},
+        ],
+        documents={"SPEC-004": spec.format(**soy), "SPEC-001": spec.format(**milk)},
+    )
+
+    def per_100g(nutrients):
+        args = CalcNutritionArgs(
+            ingredients=[{"name": "x", "grams": 800, "nutrients_per_100g": nutrients}]
+        )
+        return calc_nutrition(args.ingredients)["per_100g"]
+
+    choice = {
+        "substitutions": [
+            {
+                "original": "молоко",
+                "replacement": "соєвий напій",
+                "grams": 800,
+                "sources": ["SPEC-004"],
+            }
+        ],
+        "nutrients": {
+            "молоко": {"per_100g": milk, "source": "SPEC-001"},
+            "соєвий напій": {"per_100g": soy, "source": "SPEC-004"},
+        },
+    }
+    answer = {
+        "substitutions": [
+            {
+                "original": "молоко",
+                "replacement": "соєвий напій",
+                "grams": 800,
+                "rationale": "SPEC-004",
+                "sources": ["SPEC-004"],
+            }
+        ],
+        "allergens_before": ["milk"],
+        "allergens_after": ["soybeans"],
+        "nutrition_per_100g": {"before": per_100g(milk), "after": per_100g(soy)},
+        "warnings": ["Новий алерген: соя."],
+    }
+    llm = FakeLLM([json.dumps(choice, ensure_ascii=False), json.dumps(answer, ensure_ascii=False)])
+    client = await make_client(pool, llm)
+
+    response = await client.post(
+        "/reformulate",
+        json={
+            "product_name": "Йогурт",
+            "ingredients": [{"name": "молоко", "grams": 800}],
+            "goal": "remove_allergen",
+            "goal_params": {"allergen": "milk"},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(llm.calls) == 2
+    trace = response.json()["trace"]
+    assert [e["purpose"] for e in trace if e["type"] == "llm_call"] == ["choose", "final"]
+    assert response.json()["allergens_after"] == ["soybeans"]

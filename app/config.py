@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # Deviation from spec (all-MiniLM-L6-v2): the corpus is Ukrainian, see .env.example.
     embedding_model: str = "intfloat/multilingual-e5-small"
 
+    # loop: free tool calling (up to agent_max_iterations LLM calls);
+    # pipeline: fixed tool order chosen by code, 2 LLM calls (3 with a retry).
+    agent_mode: Literal["loop", "pipeline"] = "loop"
     agent_max_iterations: int = Field(default=6, ge=1, le=20)
     agent_timeout_seconds: float = Field(default=60, gt=0, le=600)
 

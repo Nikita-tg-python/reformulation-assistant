@@ -15,6 +15,7 @@ from app.llm.base import (
     Retry,
     ToolCall,
     ToolSpec,
+    api_key_problem,
     parse_retry_after,
     with_retries,
 )
@@ -43,9 +44,12 @@ class GroqClient(LLMClient):
         if reasoning_effort is None and model and model.startswith("openai/gpt-oss"):
             reasoning_effort = "low"
         self._reasoning = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
+        self._key_problem = api_key_problem("GROQ_API_KEY", api_key)
         # max_retries=0: the SDK would otherwise retry silently on its own; we use with_retries.
         self._client = (
-            groq.AsyncGroq(api_key=api_key, timeout=timeout_s, max_retries=0) if api_key else None
+            groq.AsyncGroq(api_key=api_key, timeout=timeout_s, max_retries=0)
+            if api_key and not self._key_problem
+            else None
         )
 
     async def complete(self, messages: list[Message], *, json_output: bool = False) -> str:
@@ -87,6 +91,8 @@ class GroqClient(LLMClient):
         return LLMResponse(text=text, tool_calls=calls, message=message)
 
     async def _create(self, messages: list[Message], **kwargs: Any) -> Any:
+        if self._key_problem:
+            raise LLMNotConfiguredError(self._key_problem)
         if self._client is None:
             raise LLMNotConfiguredError("GROQ_API_KEY is not set")
         if not self._model:

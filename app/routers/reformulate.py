@@ -8,6 +8,7 @@ import httpx
 from fastapi import APIRouter, Depends
 
 from app.agent.loop import AgentError, run_agent
+from app.agent.pipeline import run_pipeline
 from app.agent.tools import AgentTools
 from app.config import get_settings
 from app.deps import get_embedder, get_http, get_llm, get_pool
@@ -41,13 +42,16 @@ async def reformulate(
     tools = AgentTools(pool, embedder, http)  # fresh per run: per-run product cache
     started = time.perf_counter()
     try:
-        result = await run_agent(
-            llm,
-            tools,
-            req,
-            max_iterations=settings.agent_max_iterations,
-            timeout_s=settings.agent_timeout_seconds,
-        )
+        if settings.agent_mode == "pipeline":
+            result = await run_pipeline(llm, tools, req, timeout_s=settings.agent_timeout_seconds)
+        else:
+            result = await run_agent(
+                llm,
+                tools,
+                req,
+                max_iterations=settings.agent_max_iterations,
+                timeout_s=settings.agent_timeout_seconds,
+            )
     except AgentError as exc:
         await _record_run(
             pool, req, {"error": {"code": exc.code, "message": exc.message}}, exc.trace,

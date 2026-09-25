@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
@@ -55,9 +56,17 @@ async def run_agent(
     timeout_s: float,
 ) -> AgentResult:
     trace: Trace = []  # shared with _loop, so a timeout still returns what was collected
+    return await guarded(_loop(llm, tools, request, trace, max_iterations), trace, timeout_s)
+
+
+async def guarded(work: Awaitable[AgentResult], trace: Trace, timeout_s: float) -> AgentResult:
+    """Run an agent body under the time limit; every failure becomes AgentError + trace.
+
+    Shared by the loop and the fixed pipeline so both fail the same way.
+    """
     try:
         async with asyncio.timeout(timeout_s) as deadline:
-            return await _loop(llm, tools, request, trace, max_iterations)
+            return await work
     except TimeoutError:
         if deadline.expired():
             raise AgentTimeoutError(f"agent exceeded {timeout_s:g} s", trace) from None
