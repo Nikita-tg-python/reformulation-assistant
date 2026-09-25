@@ -65,6 +65,54 @@ jobs:
             exit 1
           fi
 
+  eval:
+    name: RAG eval (recall@5, MRR)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: reformulation
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d reformulation"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/reformulation
+      EMBEDDING_MODEL: intfloat/multilingual-e5-small
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0  # no floating v10 tag upstream (last one is v7)
+        with:
+          version: "0.8.24"
+          python-version: "3.12"
+          enable-cache: true
+
+      # Only the files app/embeddings.py downloads (~470 MB): ONNX weights, tokenizer, config.
+      - name: Cache embedding model
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.HF_HOME }}
+          key: hf-${{ env.EMBEDDING_MODEL }}-onnx-v1
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Eval (fails if recall@5 < 0.8 in any search mode)
+        run: uv run --locked python -m eval.run
+
   k8s:
     name: k8s manifests
     runs-on: ubuntu-latest

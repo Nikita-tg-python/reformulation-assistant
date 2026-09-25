@@ -1,5 +1,5 @@
 # All targets run in Docker: the host needs only Docker and make.
-.PHONY: help up down logs ingest test lint fmt clean k8s-secrets k8s-up ingest-k8s k8s-down
+.PHONY: help up down logs ingest test lint fmt eval clean k8s-secrets k8s-up ingest-k8s k8s-down
 
 TEST = docker compose --profile dev run --rm test sh -c
 
@@ -29,6 +29,9 @@ lint:  ## ruff check + format check
 
 fmt:  ## apply ruff fixes and formatting
 	$(TEST) "uv sync --locked -q && uv run --locked ruff check --fix . && uv run --locked ruff format ."
+
+eval:  ## RAG quality: recall@5 and MRR, vector vs hybrid, in a temporary database
+	docker compose run --rm -v "$(CURDIR)/eval:/app/eval:ro" api python -m eval.run
 
 clean:  ## remove containers AND volumes (database, test venv)
 	docker compose --profile dev down -v

@@ -1,0 +1,10 @@
+{"question": "Що покласти в бісквітне тісто, якщо клієнт не їсть яєць?", "expected": ["SPEC-011", "TRIAL-005"], "kind": "semantic"}
+{"question": "Скільки підсолоджувача на основі еритриту можна додати, щоб не було проносного ефекту?", "expected": ["SPEC-007"], "kind": "semantic"}
+{"question": "Як зробити десерт менш солодким і не втратити масу продукту?", "expected": ["GUIDE-002", "TRIAL-004"], "kind": "semantic"}
+{"question": "Яка рослинна сировина дає найщільніший згусток при ферментації?", "expected": ["TRIAL-002", "SPEC-004"], "kind": "semantic"}
+{"question": "Чи безпечний напій з вівса для людей з целіакією?", "expected": ["SPEC-003"], "kind": "semantic"}
+{"question": "Як позначати на етикетці інгредієнт, що з'явився після зміни рецептури?", "expected": ["GUIDE-001"], "kind": "semantic"}
+{"question": "Який цукрозамінник темніє під час випікання?", "expected": ["SPEC-008", "GUIDE-002"], "kind": "semantic"}
+{"question": "Чим замінити пшеницю в кексі для людей, що не переносять глютен?", "expected": ["SPEC-012", "TRIAL-006"], "kind": "semantic"}
+{"question": "SPEC-001", "expected": ["SPEC-001"], "kind": "code"}
+{"question": "TRIAL-003", "expected": ["TRIAL-003"], "kind": "code"}
