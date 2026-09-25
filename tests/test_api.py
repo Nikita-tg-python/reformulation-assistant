@@ -248,6 +248,30 @@ async def test_ask_end_to_end_with_vector_search(make_client, db_pool):
 
 
 @needs_db
+async def test_hybrid_search_puts_the_document_with_that_code_first(make_client, db_pool):
+    from app.retrieval import search_chunks
+
+    # A chunk never contains its own document code: only the full-text index knows it
+    # (chunks.tsv includes doc_id). Vector search has nothing to match "SPEC-001" against.
+    client = await make_client(db_pool)
+    docs = [
+        document("SPEC-001", "Молоко коров'яче 2.5% жиру: білок 2.8 г, лактоза 4.7 г."),
+        document("SPEC-010", "Яйце куряче, меланж пастеризований для бісквіта."),
+        EGG_DOC,
+        MILK_DOC,
+    ]
+    for doc in docs:
+        assert (await client.post("/documents", json=doc)).status_code == 200
+
+    hybrid = await search_chunks(db_pool, FakeEmbedder(), "SPEC-001", top_k=3, mode="hybrid")
+    vector = await search_chunks(db_pool, FakeEmbedder(), "SPEC-001", top_k=3, mode="vector")
+
+    assert hybrid[0].doc_id == "SPEC-001"
+    assert 0 <= hybrid[0].score <= 1  # still cosine similarity, not the RRF score
+    assert len(vector) == 3  # vector mode ignores the full-text index
+
+
+@needs_db
 async def test_reformulate_records_successful_and_timed_out_runs(make_client, db_pool, monkeypatch):
     from app.config import Settings
     from app.routers import reformulate as reformulate_router

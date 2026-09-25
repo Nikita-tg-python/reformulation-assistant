@@ -10,7 +10,7 @@ HTTP-сервіс для харчової R&D: технолог подає ре�
 
 ## Стек
 Python 3.12, uv, FastAPI, Pydantic v2, pydantic-settings, uvicorn, asyncpg з ручним SQL, PostgreSQL 16 + pgvector
-(`pgvector/pgvector:pg16`, індекс hnsw, косинусна відстань), ембединги `intfloat/multilingual-e5-small` (384) через ONNX Runtime без torch (не MiniLM зі спеки, бо корпус український),
+(`pgvector/pgvector:pg16`, hnsw + повнотекстовий GIN, гібридний пошук через RRF), ембединги `intfloat/multilingual-e5-small` (384) через ONNX Runtime без torch (не MiniLM зі спеки, бо корпус український),
 LLM: Groq (за замовчуванням, `LLM_PROVIDER=groq`) або Gemini, Open Food Facts API, Docker Compose, pytest + pytest-asyncio + httpx, ruff.
 
 ## Структура
@@ -22,9 +22,9 @@ app/agent/      loop.py (цикл tool calling), pipeline.py (фіксовани
                 tools.py (3 інструменти + JSON-схеми), prompts.py
 app/routers/    documents.py, ask.py, reformulate.py
 data/corpus/    20 markdown-документів з frontmatter doc_id, title, doc_type
-migrations/     001_init.sql, 002_run_request_id.sql; застосовуються на старті (без Alembic)
+migrations/     001_init, 002_run_request_id, 003_fulltext (.sql); застосовуються на старті, без Alembic
 tests/          test_chunking, test_calc_nutrition, test_agent_loop, test_pipeline, test_tools,
-                test_llm_retries, test_api (+ conftest.py, fakes.py)
+                test_llm_retries, test_retrieval, test_api (+ conftest.py, fakes.py)
 k8s/            бонус: kustomize для kind (Postgres, api, Job інжесту); k8s/secrets.env не комітити
 .github/        workflows/ci.yml: ruff, pytest з pgvector, збірка образу, kustomize
 ```

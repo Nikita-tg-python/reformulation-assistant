@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+SearchMode = Literal["vector", "hybrid"]
+
 
 class Settings(BaseSettings):
     """All configuration comes from environment variables (see .env.example)."""
@@ -23,6 +25,8 @@ class Settings(BaseSettings):
 
     # Deviation from spec (all-MiniLM-L6-v2): the corpus is Ukrainian, see .env.example.
     embedding_model: str = "intfloat/multilingual-e5-small"
+    # hybrid: vector + full-text search fused with RRF; vector: embeddings only.
+    search_mode: SearchMode = "hybrid"
 
     # loop: free tool calling (up to agent_max_iterations LLM calls);
     # pipeline: fixed tool order chosen by code, 2 LLM calls (3 with a retry).

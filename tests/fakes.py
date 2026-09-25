@@ -82,5 +82,8 @@ class FakePool:
     async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
         if "FROM documents" in query:  # retrieval.spec_nutrients
             return [{"doc_id": d, "content": c} for d, c in self.documents.items() if d in args[0]]
+        if "websearch_to_tsquery" in query:  # full-text half of hybrid search: no matches
+            return []
         top_k = args[1]
-        return sorted(self.chunks, key=lambda c: -c["score"])[:top_k]
+        ranked = sorted(self.chunks, key=lambda c: -c["score"])[:top_k]
+        return [{"id": n, **c} for n, c in enumerate(ranked)]
