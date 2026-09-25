@@ -474,6 +474,16 @@ def test_prompt_asks_for_parallel_tool_calls():
     assert "SAME turn as parallel calls" in prompts.system_prompt()
 
 
+def test_added_ingredient_has_null_original():
+    data = json.loads(final())
+    data["substitutions"].append(
+        {"original": None, "replacement": "ER-ST", "grams": 27, "rationale": "SPEC-007",
+         "sources": ["SPEC-002"]}
+    )  # fmt: skip
+    draft = ReformulationDraft.model_validate(data)
+    assert draft.substitutions[-1].original is None
+
+
 # ---------- recipe facts and turn budget (what makes the loop fit in 6 turns) ----------
 
 

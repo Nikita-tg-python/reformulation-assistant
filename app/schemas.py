@@ -161,7 +161,8 @@ class NutritionComparison(BaseModel):
 
 
 class Substitution(BaseModel):
-    original: str = Field(min_length=1)
+    # None: an added ingredient that replaces nothing (e.g. a sweetener next to reduced sugar).
+    original: str | None = Field(default=None, min_length=1)
     replacement: str = Field(min_length=1)
     grams: float = Field(ge=0)
     rationale: str = Field(min_length=1)
@@ -193,7 +194,12 @@ class ReformulationDraft(BaseModel):
         for s in self.substitutions:
             if s.confidence == "low" and not any(s.replacement in w for w in self.warnings):
                 self.warnings.append(
-                    f"Заміна «{s.original}» → «{s.replacement}» має низьку впевненість: "
+                    (
+                        f"Заміна «{s.original}» → «{s.replacement}»"
+                        if s.original
+                        else f"Додавання «{s.replacement}»"
+                    )
+                    + " має низьку впевненість: "
                     "немає підтвердження в базі знань чи Open Food Facts."
                 )
         return self

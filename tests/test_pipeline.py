@@ -417,3 +417,39 @@ def test_reduce_sugar_searches_for_sweeteners():
         == "заміна для цукор, замінник цукру: поліоли, інтенсивні підсолоджувачі, рідкісні цукри"
     )
     assert "sugar replacement is a sweetener" in prompts.PIPELINE_CHOOSE_PROMPT
+
+
+async def test_two_substitutions_of_the_same_original_keep_both_lines():
+    # Live bug: "цукор -> цукор 63 g" then "цукор -> ER-ST 27 g" dropped the sugar.
+    from app.agent.pipeline import _apply, _Choice
+
+    before = [{"name": "молоко", "grams": 800, "nutrients_per_100g": N["milk"]},
+              {"name": "цукор", "grams": 90, "nutrients_per_100g": N["sugar"]}]  # fmt: skip
+    picks = _Choice.model_validate({"substitutions": [
+        {"original": "цукор", "replacement": "цукор", "grams": 63},
+        {"original": "цукор", "replacement": "ER-ST", "grams": 27},
+    ]})  # fmt: skip
+    after = _apply(before, picks, {"цукор": N["sugar"], "er-st": N["milk"]})
+
+    assert [(i["name"], i["grams"]) for i in after] == [
+        ("молоко", 800),
+        ("цукор", 63),
+        ("ER-ST", 27),
+    ]
+
+
+async def test_partial_replacement_that_drops_mass_is_rechosen():
+    # Live: "цукор -> ER-ST 27 g" alone removed all 90 g of sugar (1000 g -> 937 g).
+    partial = json.loads(choice())
+    partial["substitutions"][0]["grams"] = 740  # soy 740 g instead of milk 800 g: -6%
+    _, llm, _ = await run([json.dumps(partial, ensure_ascii=False), choice(), final()])
+
+    assert len(llm.calls) == 3
+    feedback = llm.calls[1][-1].content
+    assert "weighs 930.3 g instead of 1000 g" in feedback
+    assert "substitute it with itself" in feedback
+
+
+async def test_small_mass_change_within_tolerance_is_accepted():
+    _, llm, _ = await run([choice(), final()])  # starter 10 g -> DVS 0.3 g: -0.97%
+    assert len(llm.calls) == 2

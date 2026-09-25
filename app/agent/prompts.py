@@ -74,7 +74,8 @@ EXAMPLE_ANSWER = """\
 ANSWER_FORMAT = """Final answer: one JSON object, nothing else.
 {
   "substitutions": [{
-    "original": str, "replacement": str, "grams": number >= 0, "rationale": str,
+    "original": str | null (null: added ingredient), "replacement": str, "grams": number >= 0,
+    "rationale": str,
     "sources": [doc_id or OFF source_id], "confidence": "high" | "medium" | "low"
   }],
   "allergens_before": [code], "allergens_after": [code],

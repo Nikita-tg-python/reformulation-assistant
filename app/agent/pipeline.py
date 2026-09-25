@@ -43,6 +43,8 @@ from app.specs import own_spec
 MAX_LLM_CALLS = 3
 MAX_CHOOSE_CALLS = 2  # a second choice when the first one is invalid or lacks data
 KB_TEXT_FOR_CHOICE = 200  # characters of each document shown to the choosing LLM
+# Allowed change of total mass; covers e.g. 10 g working starter -> 0.3 g DVS (TRIAL-001).
+MASS_TOLERANCE = 0.02
 
 Nutrients = dict[str, float | None]
 
@@ -170,7 +172,22 @@ class _Pipeline:
         problems = [f"no verified nutrients per 100 g for: {name}" for name in missing]
         if unknown:
             problems.append(f"sources {unknown} are not in the evidence")
+        problems += self._mass_problems(choice)
         return choice, self._problems(problems, messages)
+
+    def _mass_problems(self, choice: _Choice) -> list[str]:
+        """The goals keep the product mass: a big change means a misread substitution,
+        e.g. "цукор -> ER-ST 27 g" meant as partial but applied as a full replacement."""
+        before = [{"name": i.name, "grams": i.grams} for i in self.request.ingredients]
+        mass_before = sum(i["grams"] for i in before)
+        mass_after = sum(i["grams"] for i in _apply(before, choice, {}))
+        if abs(mass_after - mass_before) <= MASS_TOLERANCE * mass_before:
+            return []
+        return [
+            f"the new recipe weighs {mass_after:g} g instead of {mass_before:g} g: each "
+            "substitution replaces its whole original line; to keep part of an ingredient, "
+            'also substitute it with itself at the remaining grams (e.g. "цукор" -> "цукор" 63 g)'
+        ]
 
     def _record_choice(self, choice: _Choice, messages: list[Message]) -> None:
         """What the model chose, so a failed run can be read from the trace alone."""
@@ -389,19 +406,26 @@ def _key(name: str) -> str:
 def _apply(
     before: list[dict[str, Any]], choice: _Choice, nutrients: dict[str, Nutrients]
 ) -> list[dict[str, Any]]:
-    """The new recipe: a substitution replaces its original ingredient, or is added."""
+    """The new recipe: a substitution replaces its original ingredient, or is added.
+
+    Each original line is replaced at most once. A second substitution of the same original
+    ("цукор -> цукор 63 g", "цукор -> ER-ST 27 g") is added as a new line; replacing again
+    would drop the first replacement (live bug: the sugar vanished from the recipe).
+    """
     after = [dict(i) for i in before]
+    replaced: set[int] = set()
     for pick in choice.substitutions:
         line = {
             "name": pick.replacement,
             "grams": pick.grams,
             "nutrients_per_100g": nutrients.get(_key(pick.replacement), {}),
         }
+        original = _key(pick.original) if pick.original else None
         index = next(
             (
                 n
-                for n, i in enumerate(after)
-                if pick.original and _key(i["name"]) == _key(pick.original)
+                for n in range(len(before))
+                if n not in replaced and _key(before[n]["name"]) == original
             ),
             None,
         )
@@ -409,6 +433,7 @@ def _apply(
             after.append(line)
         else:
             after[index] = line
+            replaced.add(index)
     return after
 
 

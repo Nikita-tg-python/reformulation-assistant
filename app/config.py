@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     # loop: free tool calling (up to agent_max_iterations LLM calls);
     # pipeline: fixed tool order chosen by code, 2 LLM calls (3 with a retry).
-    agent_mode: Literal["loop", "pipeline"] = "loop"
+    agent_mode: Literal["loop", "pipeline"] = "pipeline"
     agent_max_iterations: int = Field(default=6, ge=1, le=20)
     agent_timeout_seconds: float = Field(default=60, gt=0, le=600)
 
