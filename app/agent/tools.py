@@ -86,7 +86,12 @@ class CalcNutritionArgs(BaseModel):
 # ---------- JSON schemas for tool calling ----------
 
 # Descriptions are kept short on purpose: the schemas are resent with every LLM call.
-_NUTRIENTS_SCHEMA = {"type": "object", "properties": {n: {"type": "number"} for n in NUTRIENTS}}
+# null is allowed, as in NutritionIngredient: Open Food Facts often lacks a value (e.g. kcal),
+# and Groq rejects the whole tool call when the arguments break this schema.
+_NUTRIENTS_SCHEMA = {
+    "type": "object",
+    "properties": {n: {"type": ["number", "null"]} for n in NUTRIENTS},
+}
 
 TOOL_SPECS = [
     ToolSpec(

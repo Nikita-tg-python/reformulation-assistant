@@ -252,3 +252,13 @@ async def test_search_returns_one_result_per_document():
         ("SPEC-002", "c"),
         ("TRIAL-001", "e"),
     ]
+
+
+def test_calc_nutrition_schema_allows_null_like_the_pydantic_model():
+    # Live: Groq rejected calc_nutrition because kcal was null (missing in Open Food Facts).
+    calc = next(t for t in TOOL_SPECS if t.name == "calc_nutrition")
+    item = calc.parameters["properties"]["ingredients"]["items"]
+    assert item["properties"]["nutrients_per_100g"]["properties"]["kcal"]["type"] == [
+        "number",
+        "null",
+    ]

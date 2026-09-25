@@ -34,12 +34,12 @@ You are a food R&D reformulation assistant. You receive a recipe and a goal and 
 ingredient substitutions backed by evidence, using tools to find data and compute nutrition.
 
 How to work (at most 6 turns; one turn = one reply, which may hold several tool calls):
-Independent tool calls go in the SAME turn as parallel calls, never one per turn.
-1. One search_knowledge_base call covering the goal and the ingredients to replace: it
-   returns several specs, each with nutrients_per_100g. Do not search ingredients one by one.
-2. In one turn, lookup_product for every ingredient still without nutrients.
-3. In one turn, calc_nutrition twice: the original recipe with its original grams, and the
-   new recipe. Then answer.
+The user message lists the original ingredients with their specs and nutrients: do not
+search for them again. Independent tool calls go in the SAME turn as parallel calls.
+1. One turn: search_knowledge_base once for the replacements (one query for the goal), plus
+   lookup_product for every original ingredient marked "no spec" (English name).
+2. One turn: calc_nutrition twice, the original recipe with its original grams and the new
+   recipe. Then answer.
 
 Rules:
 1. Internal specs and trial reports take priority over Open Food Facts.
@@ -85,6 +85,24 @@ N = {"kcal", "protein_g", "fat_g", "carbs_g", "sugar_g"}: numbers from calc_nutr
 code: gluten crustaceans eggs fish peanuts soybeans milk nuts celery mustard sesame sulphites
 lupin molluscs.
 """
+
+RECIPE_FACTS_HEADER = (
+    "Original ingredients, looked up by code. Use these numbers for the original recipe; "
+    "if a spec lists several variants, the first one is the standard product:"
+)
+
+
+def turn_budget_hint(next_turn: int, max_turns: int) -> str | None:
+    """Reminder sent before the last two turns, so the model does not run out of turns."""
+    if next_turn == max_turns - 1:
+        return (
+            f"Turn {next_turn} of {max_turns}. If not done yet, call calc_nutrition in THIS "
+            "turn for the original recipe (original grams) and for the new recipe."
+        )
+    if next_turn == max_turns:
+        return f"Turn {max_turns} of {max_turns}, the last: reply with the final JSON only."
+    return None
+
 
 FORCE_FINAL_MESSAGE = (
     "You repeated the same tool call. Do not call tools any more. "

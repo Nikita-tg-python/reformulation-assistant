@@ -248,7 +248,12 @@ async def test_ask_end_to_end_with_vector_search(make_client, db_pool):
 
 
 @needs_db
-async def test_reformulate_records_successful_and_timed_out_runs(make_client, db_pool):
+async def test_reformulate_records_successful_and_timed_out_runs(make_client, db_pool, monkeypatch):
+    from app.config import Settings
+    from app.routers import reformulate as reformulate_router
+
+    # This test drives the free tool-calling loop, whatever AGENT_MODE defaults to.
+    monkeypatch.setattr(reformulate_router, "get_settings", lambda: Settings(agent_mode="loop"))
     recipe = [{"name": "молоко", "grams": 800, "nutrients_per_100g": {"kcal": 52}}]
     coconut = [{"name": "кокосове молоко", "grams": 800, "nutrients_per_100g": {"kcal": 28}}]
     final = {
@@ -293,15 +298,15 @@ async def test_reformulate_records_successful_and_timed_out_runs(make_client, db
     assert [e.get("tool") for e in body["trace"]].count("calc_nutrition") == 2
     assert timeout.status_code == 504
     assert timeout.json()["error"]["code"] == "agent_timeout"
-    assert len(timeout.json()["error"]["trace"]) == 6
+    assert len(timeout.json()["error"]["trace"]) == 7  # 1 facts search + 6 iterations
 
     rows = await db_pool.fetch(
         "SELECT status, request_id, duration_ms, jsonb_array_length(trace) AS steps, "
         "request->>'goal' AS goal FROM reformulation_runs ORDER BY id"
     )
     assert [(r["status"], r["request_id"], r["steps"], r["goal"]) for r in rows] == [
-        ("ok", "run-ok", 4, "remove_allergen"),
-        ("agent_timeout", "run-loop", 6, "remove_allergen"),
+        ("ok", "run-ok", 5, "remove_allergen"),  # 1 facts search + 3 tool calls + final
+        ("agent_timeout", "run-loop", 7, "remove_allergen"),
     ]
     assert all(r["duration_ms"] is not None for r in rows)
 

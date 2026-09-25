@@ -54,9 +54,11 @@ async def run_agent(
     *,
     max_iterations: int,
     timeout_s: float,
+    prepare_facts: bool = True,
 ) -> AgentResult:
     trace: Trace = []  # shared with _loop, so a timeout still returns what was collected
-    return await guarded(_loop(llm, tools, request, trace, max_iterations), trace, timeout_s)
+    work = _loop(llm, tools, request, trace, max_iterations, prepare_facts)
+    return await guarded(work, trace, timeout_s)
 
 
 async def guarded(work: Awaitable[AgentResult], trace: Trace, timeout_s: float) -> AgentResult:
@@ -86,12 +88,16 @@ async def _loop(
     request: ReformulateRequest,
     trace: Trace,
     max_iterations: int,
+    prepare_facts: bool = True,
 ) -> AgentResult:
-    messages = [
-        Message("system", prompts.system_prompt()),
-        Message("user", prompts.user_message(request)),
-    ]
     evidence = _Evidence()
+    user = prompts.user_message(request)
+    if prepare_facts:
+        # Live runs spent 3-4 of 6 turns finding numbers for the ORIGINAL ingredients.
+        # Those are facts about the input, so code looks them up once before the first call;
+        # the model still chooses replacements and calls the tools for them itself.
+        user += "\n\n" + await _recipe_facts(tools, request, evidence, trace)
+    messages = [Message("system", prompts.system_prompt()), Message("user", user)]
     last_call: tuple[str, str] | None = None
     final_only = False  # set by the loop guard: tools are no longer executed
     retried = False
@@ -104,16 +110,23 @@ async def _loop(
         messages.append(response.message)
 
         if response.tool_calls:
+            # Loop guard first (a repeated call switches to final-answer mode), then every
+            # call that passed runs concurrently; results are handled in call order.
+            skip = []
             for call in response.tool_calls:
                 signature = (call.name, json.dumps(call.arguments, sort_keys=True))
-                if final_only or signature == last_call:
-                    final_only = True
+                final_only = final_only or signature == last_call
+                skip.append(final_only)
+                last_call = signature
+            planned = list(zip(response.tool_calls, skip, strict=True))
+            results = iter(await _execute_all(tools, [c for c, skipped in planned if not skipped]))
+            for call, skipped in planned:
+                if skipped:
                     result = _skipped(call, trace, iteration, tokens)
                 else:
-                    result = await tools.execute(call.name, call.arguments)
+                    result = next(results)
                     evidence.add(call.name, call.arguments, result)
                     _record(trace, _trace_call(iteration, call, result), tokens)
-                last_call = signature
                 compact[len(messages)] = _to_json(compact_result(call.name, result))
                 messages.append(
                     Message(
@@ -125,6 +138,10 @@ async def _loop(
                 )
             if final_only:
                 messages.append(Message("user", prompts.FORCE_FINAL_MESSAGE))
+            else:
+                hint = prompts.turn_budget_hint(iteration + 1, max_iterations)
+                if hint:
+                    messages.append(Message("user", hint))
             continue
 
         try:
@@ -147,6 +164,50 @@ async def _loop(
         return AgentResult(answer=answer, trace=trace, iterations=iteration)
 
     raise AgentTimeoutError(f"no final answer after {max_iterations} iterations", trace)
+
+
+async def _recipe_facts(
+    tools: ToolExecutor, request: ReformulateRequest, evidence: "_Evidence", trace: Trace
+) -> str:
+    """Spec and nutrients of every original ingredient, found by code (iteration 0 in trace).
+
+    Only knowledge-base specs: Open Food Facts by a Ukrainian name is unreliable
+    ("полуниця" returns a strawberry yogurt), so those are left to the model in English.
+    """
+    calls = [
+        ToolCall(
+            id=f"facts-{n}",
+            name="search_knowledge_base",
+            arguments={"query": ingredient.name, "top_k": 3},
+        )
+        for n, ingredient in enumerate(request.ingredients)
+    ]
+    results = await _execute_all(tools, calls)  # one search per ingredient, all at once
+    lines = []
+    for ingredient, call, result in zip(request.ingredients, calls, results, strict=True):
+        evidence.add(call.name, call.arguments, result)
+        _record(trace, _trace_call(0, call, result), 0)
+        spec = next((r for r in result.get("results", []) if r.get("nutrients_per_100g")), None)
+        if spec:
+            lines.append(
+                f"- {ingredient.name} ({ingredient.grams:g} g): [{spec['doc_id']}] "
+                f"{spec['title']} | nutrients_per_100g: {spec['nutrients_per_100g']}"
+            )
+        else:
+            lines.append(
+                f"- {ingredient.name} ({ingredient.grams:g} g): no spec, use lookup_product "
+                "with an English name"
+            )
+    return prompts.RECIPE_FACTS_HEADER + "\n" + "\n".join(lines)
+
+
+async def _execute_all(tools: ToolExecutor, calls: list[ToolCall]) -> list[dict[str, Any]]:
+    """Run tool calls concurrently; results come back in call order.
+
+    Tools are independent within one turn (DB and embedder are shared, Open Food Facts is
+    plain HTTP), so the turn takes as long as its slowest call, not the sum of them.
+    """
+    return list(await asyncio.gather(*(tools.execute(c.name, c.arguments) for c in calls)))
 
 
 @dataclass(frozen=True)

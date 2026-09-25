@@ -125,7 +125,7 @@ async def run(replies, tools=None, max_iterations=6, timeout_s=5.0):
     llm = FakeLLM(replies)
     tools = tools or FakeTools()
     result = await run_agent(
-        llm, tools, REQUEST, max_iterations=max_iterations, timeout_s=timeout_s
+        llm, tools, REQUEST, max_iterations=max_iterations, timeout_s=timeout_s, prepare_facts=False
     )
     return result, llm, tools
 
@@ -472,3 +472,133 @@ async def test_parallel_tool_calls_in_one_turn_use_one_iteration():
 
 def test_prompt_asks_for_parallel_tool_calls():
     assert "SAME turn as parallel calls" in prompts.system_prompt()
+
+
+# ---------- recipe facts and turn budget (what makes the loop fit in 6 turns) ----------
+
+
+def _spec(doc_id: str, title: str, nutrients: str) -> dict:
+    return {"doc_id": doc_id, "title": title, "text": "…", "score": 0.9,
+            "nutrients_per_100g": nutrients}  # fmt: skip
+
+
+ORIGINAL_SPECS = {
+    "молоко 2.5%": _spec(
+        "SPEC-001", "Молоко", "kcal: 52; protein_g: 2.8; fat_g: 2.5; carbs_g: 4.7; sugar_g: 4.7"
+    ),
+    "цукор": _spec(
+        "SPEC-006", "Цукор", "kcal: 400; protein_g: 0; fat_g: 0; carbs_g: 100; sugar_g: 100"
+    ),
+}
+
+
+class FactsTools(FakeTools):
+    """Search that knows the specs of the original ingredients."""
+
+    async def execute(self, name, arguments):
+        if name == "search_knowledge_base" and arguments["query"] in ORIGINAL_SPECS:
+            self.executed.append((name, arguments))
+            return {"results": [ORIGINAL_SPECS[arguments["query"]]]}
+        return await super().execute(name, arguments)
+
+
+async def test_original_ingredient_facts_are_prepared_before_the_first_call():
+    llm, tools = FakeLLM([*HAPPY, final()]), FactsTools()
+    result = await run_agent(llm, tools, REQUEST, max_iterations=6, timeout_s=5)
+
+    first_user = llm.calls[0][1].content
+    assert prompts.RECIPE_FACTS_HEADER in first_user
+    assert "- молоко 2.5% (800 g): [SPEC-001] Молоко | nutrients_per_100g: kcal: 52" in first_user
+    assert (
+        "- полуниця заморожена (100 g): no spec, use lookup_product with an English name"
+        in first_user
+    )
+    facts = [e for e in result.trace if e["iteration"] == 0]
+    assert [e["tool"] for e in facts] == ["search_knowledge_base"] * 4  # one per ingredient
+    assert result.iterations == 4  # facts cost no LLM calls
+
+
+async def test_turn_budget_hints_before_the_last_two_turns():
+    endless = [call("search_knowledge_base", query=f"варіант {i}") for i in range(10)]
+    llm = FakeLLM(endless)
+    with pytest.raises(AgentTimeoutError):
+        await run_agent(
+            llm, FakeTools(), REQUEST, max_iterations=6, timeout_s=5, prepare_facts=False
+        )
+
+    assert llm.calls[4][-1].content.startswith("Turn 5 of 6.")
+    assert "calc_nutrition in THIS turn" in llm.calls[4][-1].content
+    assert llm.calls[5][-1].content == "Turn 6 of 6, the last: reply with the final JSON only."
+    assert all(m.role != "user" or "Turn" not in m.content for m in llm.calls[3][2:])
+
+
+def test_gemini_merges_a_note_after_tool_results_into_the_same_user_turn():
+    from app.llm.base import Message as M
+    from app.llm.gemini import _to_contents
+
+    contents = _to_contents([
+        M("user", "recipe"),
+        M("assistant", tool_calls=[ToolCall("a", "search_knowledge_base", {"query": "x"})]),
+        M("tool", "{}", tool_call_id="a", name="search_knowledge_base"),
+        M("user", "Turn 5 of 6."),
+    ])  # fmt: skip
+    assert [c.role for c in contents] == ["user", "model", "user"]
+    assert contents[-1].parts[0].function_response is not None
+    assert contents[-1].parts[1].text == "Turn 5 of 6."
+
+
+class BarrierTools(FactsTools):
+    """The first `parties` calls wait until all of them are in flight at once: sequential
+    execution would time out here. Earlier calls then finish later, to check the order."""
+
+    def __init__(self, parties: int) -> None:
+        super().__init__()
+        self.barrier = asyncio.Barrier(parties)
+        self.started = 0
+
+    async def execute(self, name, arguments):
+        n, self.started = self.started, self.started + 1
+        if n < self.barrier.parties:
+            async with asyncio.timeout(1):
+                await self.barrier.wait()
+            await asyncio.sleep(0.01 * (self.barrier.parties - n))  # first call finishes last
+        return await super().execute(name, arguments)
+
+
+async def test_tool_calls_of_one_turn_run_concurrently_and_keep_call_order():
+    turn = [
+        *call("search_knowledge_base", query="рослинна заміна молока"),
+        *call("lookup_product", name="coconut milk"),
+        *call("calc_nutrition", ingredients=BEFORE),
+    ]
+    result, llm, _ = await run([turn, HAPPY[2], final()], tools=BarrierTools(parties=3))
+
+    first = [e for e in result.trace if e["iteration"] == 1]
+    assert [e["tool"] for e in first] == [c.name for c in turn]
+    assert first[1]["result"]["source_id"] == "OFF:111"  # each result stays with its own call
+    fed_back = [m for m in llm.calls[1] if m.role == "tool"]
+    assert [m.tool_call_id for m in fed_back] == [c.id for c in turn]
+    assert json.loads(fed_back[2].content)["per_100g"] == PER_100G_BEFORE
+
+
+async def test_repeated_call_in_the_same_turn_skips_it_and_the_rest():
+    same = call("search_knowledge_base", query="аквафаба")
+    turn = [*same, *same, *call("lookup_product", name="aquafaba")]
+    result, _, tools = await run([*HAPPY[1:], turn, final(("SPEC-002",))])
+
+    assert [name for name, _ in tools.executed].count("search_knowledge_base") == 1
+    assert "lookup_product" not in [name for name, _ in tools.executed]
+    assert [e["tool"] for e in result.trace if e.get("skipped")] == [
+        "search_knowledge_base",
+        "lookup_product",
+    ]
+
+
+async def test_recipe_facts_are_searched_concurrently_in_ingredient_order():
+    llm = FakeLLM([*HAPPY, final()])
+    result = await run_agent(llm, BarrierTools(parties=4), REQUEST, max_iterations=6, timeout_s=5)
+
+    facts = [e for e in result.trace if e["iteration"] == 0]
+    assert [e["arguments"]["query"] for e in facts] == [i.name for i in REQUEST.ingredients]
+    lines = llm.calls[0][1].content.split(prompts.RECIPE_FACTS_HEADER)[1].strip().splitlines()
+    assert [line.split(" (")[0] for line in lines] == [f"- {i.name}" for i in REQUEST.ingredients]

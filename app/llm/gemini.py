@@ -143,9 +143,11 @@ def _to_contents(messages: list[Message]) -> list[types.Content]:
         if m.role == "system":
             continue  # goes to system_instruction
         if m.role == "user":
-            contents.append(
-                types.Content(role="user", parts=[types.Part.from_text(text=m.content)])
-            )
+            part = types.Part.from_text(text=m.content)
+            if contents and contents[-1].role == "user":
+                contents[-1].parts.append(part)  # e.g. a turn-budget note after tool results
+            else:
+                contents.append(types.Content(role="user", parts=[part]))
         elif m.role == "assistant":
             if isinstance(m.provider_data, types.Content):
                 contents.append(m.provider_data)  # verbatim: keeps thought signatures
