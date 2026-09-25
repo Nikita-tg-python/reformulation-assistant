@@ -25,6 +25,8 @@ data/corpus/    20 markdown-документів з frontmatter doc_id, title, d
 migrations/     001_init.sql, 002_run_request_id.sql; застосовуються на старті (без Alembic)
 tests/          test_chunking, test_calc_nutrition, test_agent_loop, test_pipeline, test_tools,
                 test_llm_retries, test_api (+ conftest.py, fakes.py)
+k8s/            бонус: kustomize для kind (Postgres, api, Job інжесту); k8s/secrets.env не комітити
+.github/        workflows/ci.yml: ruff, pytest з pgvector, збірка образу, kustomize
 ```
 
 ## Жорсткі правила
@@ -54,4 +56,5 @@ make ingest                 # залити data/corpus/ (ідемпотентн�
 make test                   # pytest без ключів і інтернету (+ інтеграційні на db з compose)
 make lint                   # ruff check + format --check; make fmt виправляє
 make logs / make down       # JSON-логи api / зупинка (дані лишаються)
+make k8s-up / ingest-k8s    # kind: кластер, образ, apply -k (з інжестом) / повторний інжест
 ```

@@ -65,6 +65,19 @@ jobs:
             exit 1
           fi
 
+  k8s:
+    name: k8s manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: kubectl kustomize (placeholders only, as in the repo)
+        run: |
+          cp k8s/secrets.env.example k8s/secrets.env
+          kubectl kustomize k8s/ > rendered.yaml
+          grep -c "^kind:" rendered.yaml
+
   docker:
     name: docker image
     runs-on: ubuntu-latest

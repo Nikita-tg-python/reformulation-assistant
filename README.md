@@ -197,6 +197,29 @@ docker compose exec db psql -U postgres -d reformulation -c \
 - **Промпт агента дописано:** цілі в термінах R&D, доменні правила (приховані джерела алергену, новий алерген у warnings, втрата білка понад 30%) і приклад відповіді. У живих прогонах модель замінює і молочну закваску, а не лише молоко.
 - **`/ask` на живій моделі працює:** Groq відповідає за 1–2 с, з джерелами, а на питання поза корпусом чесно відмовляє.
 
+## Kubernetes (kind)
+
+Маніфести лежать у [k8s/](k8s/) і збираються через kustomize, без Helm. Там Namespace, StatefulSet Postgres з PVC на 1 Гб і headless Service, Deployment api з однією реплікою і ClusterIP Service, а також Job для інжесту. ConfigMap і Secret генерує `kustomization.yaml`. Потрібні [kind](https://kind.sigs.k8s.io/) і `kubectl`.
+
+```bash
+make k8s-secrets                 # k8s/secrets.env: плейсхолдери + ключі LLM з локального .env
+kind create cluster --name reformulation
+docker build -t reformulation-assistant:local .
+kind load docker-image reformulation-assistant:local --name reformulation
+kubectl apply -k k8s/            # разом з Job інжесту: 20 документів
+kubectl -n reformulation rollout status deployment/api --timeout=300s
+kubectl -n reformulation port-forward svc/api 8000:8000   # в окремому терміналі
+curl -s localhost:8000/health
+# {"status":"ok","db":"ok","llm_provider":"groq"}
+```
+
+Те саме однією командою: `make k8s-up`. Повторний інжест: `make ingest-k8s`. Прибрати все: `make k8s-down`.
+
+- **Секрети.** `secretGenerator` читає `k8s/secrets.env`, а цей файл у `.gitignore`. `make k8s-secrets` створює його з [k8s/secrets.env.example](k8s/secrets.env.example), де лише плейсхолдери, і дописує `GROQ_API_KEY` та `GEMINI_API_KEY` з `.env`, нічого не виводячи. Напряму з `../.env` kustomize читати не дає, бо файли поза `k8s/` він відхиляє. До того ж так у кластер потрапляють лише ключі, без решти `.env`. Несекретні налаштування лежать у ConfigMap, серед них `AGENT_MODE=pipeline`. Імена ConfigMap і Secret мають хеш вмісту, тож після зміни значення Deployment перекочується сам.
+- **Інжест як Job, а не `kubectl exec`.** Спершу був простіший варіант з `exec` у под api, але інжест завантажує власну копію ONNX-моделі (пік близько 1.5 ГіБ). Разом з api це перевищило ліміт у 2 ГіБ, і OOM-killer вбив api. Job отримує свій под і свою пам'ять. Інжест ідемпотентний, тому Job запускається при першому `apply`. Після завершення Job видаляється через 10 хвилин, бо специфікація Job незмінна і стара Job заважала б наступному `apply`.
+- **Ресурси.** Api в compose займає близько 1.1 ГіБ, на старті до 1.5 ГіБ, тому requests 1 ГіБ, limits 2 ГіБ. З лімітом 1 ГіБ под падав з OOMKilled ще на старті.
+- **Проби на `/health`.** Коли база недоступна, `/health` повертає 503. Readiness прибирає под із Service, liveness перезапускає його приблизно через 30 с. Перевірено так: після `kubectl scale statefulset/postgres --replicas=0` api перезапустився через ~25 с, а після повернення бази піднявся сам, і дані в PVC збереглися. Компроміс: перезапуск api базу не лагодить, тож окремий `/livez`, який не залежить від бази, був би чистішим. startupProbe дає до 60 с на завантаження моделі й міграції, а initContainer чекає на Postgres.
+
 ## Рішення і відхилення від спеки
 
 - **Модель ембедингів: `intfloat/multilingual-e5-small`, а не `all-MiniLM-L6-v2`.** Корпус український, а MiniLM англомовний: на 8 контрольних питаннях правильний документ у топ-3 він знаходив у 4 випадках, e5 — у 8. MiniLM до того ж обрізає вхід на 256 токенах, менше за чанк на 400. Розмірність та сама, 384, тому схема БД не змінилася.
@@ -212,4 +235,4 @@ docker compose exec db psql -U postgres -d reformulation -c \
 1. **Структуровані факти специфікацій.** Алергени й доменні ліміти (наприклад, еритрит ≤ 8% маси) при інгесті зберігати окремими полями й перевіряти кодом, як уже перевіряються нутрієнти. Живі прогони показали, що саме цього бракує: модель пропустила глютен вівса і перевищила ліміт еритриту.
 2. **Гібридний пошук.** Повнотекстовий пошук через `tsvector` плюс Reciprocal Rank Fusion. У живих прогонах модель шукала за кодами документів («SPEC-001 SPEC-007»), а векторний пошук на таких запитах слабкий.
 3. **Оцінка якості RAG.** `eval/questions.jsonl` з очікуваними doc_id і recall@5 у CI. Вибір моделі ембедингів уже робився на такому ручному замірі, його варто зробити регресійним тестом.
-4. **Деплой.** Маніфести для kind: Deployment з liveness і readiness на `/health`, StatefulSet для Postgres. Потім хмара: образ у registry, керований Postgres з pgvector, секрети в secret manager.
+4. **Деплой у хмару.** Образ у registry, керований Postgres з pgvector, секрети в secret manager замість `k8s/secrets.env`, окремий `/livez` для liveness.

@@ -1,0 +1,43 @@
+# Loads data/corpus/ (baked into the image) into the knowledge base. Idempotent: documents
+# are upserted by doc_id. Runs on the first `kubectl apply -k`; `make ingest-k8s` reruns it.
+#
+# A Job and not `kubectl exec deploy/api`: ingest loads its own copy of the ONNX model
+# (~1.5 GiB peak), and inside the api container that exceeded the memory limit and got
+# the api OOMKilled together with the ingest. A Job has its own pod and memory budget.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ingest
+spec:
+  backoffLimit: 3
+  # A finished Job is deleted after 10 min: Job specs are immutable, so an old finished
+  # Job would block `kubectl apply -k` after the ConfigMap/Secret hash changes.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: ingest
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000  # the "app" user from the Dockerfile
+      initContainers:
+        - name: wait-for-db
+          image: pgvector/pgvector:pg16
+          command: ["sh", "-c", "until pg_isready -h postgres -p 5432; do sleep 2; done"]
+          securityContext:
+            runAsUser: 999  # postgres user in this image
+      containers:
+        - name: ingest
+          image: reformulation-assistant:local
+          imagePullPolicy: IfNotPresent
+          # Migrations are applied by create_pool under an advisory lock, so the Job may
+          # start before or together with the api.
+          command: ["python", "-m", "app.ingest", "data/corpus/"]
+          envFrom:
+            - configMapRef: {name: app-config}
+            - secretRef: {name: app-secrets}
+          resources:
+            requests: {cpu: 250m, memory: 1Gi}
+            limits: {cpu: "1", memory: 2Gi}

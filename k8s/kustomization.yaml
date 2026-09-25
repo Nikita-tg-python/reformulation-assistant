@@ -1,0 +1,33 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: reformulation
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: reformulation-assistant
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - api-deployment.yaml
+  - api-service.yaml
+  - ingest-job.yaml
+
+# Generated names get a content hash suffix (app-config-<hash>), so a changed value
+# rolls the Deployment and StatefulSet by itself: no manual rollout restart.
+configMapGenerator:
+  - name: app-config  # non-secret settings, same names as in .env.example
+    literals:
+      - LLM_PROVIDER=groq
+      - GROQ_MODEL=openai/gpt-oss-120b
+      - GEMINI_MODEL=gemini-3.5-flash
+      - EMBEDDING_MODEL=intfloat/multilingual-e5-small  # must match the model baked into the image
+      - AGENT_MODE=pipeline  # fits free-tier LLM limits; loop needs 6 LLM calls per request
+      - AGENT_MAX_ITERATIONS=6
+      - AGENT_TIMEOUT_SECONDS=60
+
+secretGenerator:
+  # secrets.env is not in git (.gitignore). `make k8s-secrets` creates it from
+  # secrets.env.example (placeholders) plus the API keys found in the local .env.
+  # kustomize cannot read ../.env itself: files outside k8s/ are refused.
+  - name: app-secrets
+    envs:
+      - secrets.env
