@@ -26,6 +26,7 @@ TEMPERATURE = 0.2
 # Groq answers 400 output_parse_failed. It is random and fails fast, so a quick retry helps.
 # Other 400s are real request errors and are not retried.
 PARSE_FAILED_RETRY_S = 1.0
+RETRY_400_CODES = {"output_parse_failed", "tool_use_failed"}
 
 
 class GroqClient(LLMClient):
@@ -126,8 +127,11 @@ def _retry_info(exc: Exception) -> Retry | None:
     if exc.status_code in RETRY_STATUSES:
         retry_after = parse_retry_after(exc.response.headers.get("retry-after"))
         return Retry(str(exc.status_code), retry_after)
-    if exc.status_code == 400 and _error_code(exc) == "output_parse_failed":
-        return Retry("400 output_parse_failed", PARSE_FAILED_RETRY_S)
+    # Malformed generations, not bad requests: a new sample usually succeeds. Live examples:
+    # reasoning text instead of a tool call (output_parse_failed) and a tool name with a
+    # leaked channel tag, "search_knowledge_base<|channel|>commentary" (tool_use_failed).
+    if exc.status_code == 400 and (code := _error_code(exc)) in RETRY_400_CODES:
+        return Retry(f"400 {code}", PARSE_FAILED_RETRY_S)
     return None
 
 

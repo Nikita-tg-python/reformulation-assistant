@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # `Retry`): rate limit (429), overload (503) and, on Groq, 400 output_parse_failed.
 RETRY_STATUSES = frozenset({429, 503})
 RETRY_DELAYS_S = (2.0, 5.0)  # one pause per retry: at most 2 retries
-MAX_RETRY_AFTER_S = 30.0  # never wait longer than this, whatever the provider asks
+MAX_RETRY_AFTER_S = 30.0  # a longer wait asked by the provider: give up at once, no retry
 
 Role = Literal["system", "user", "assistant", "tool"]
 
@@ -98,15 +98,18 @@ async def with_retries[T](
 
     `classify` returns a `Retry` for a retryable provider error and None for anything
     else; non-retryable errors are raised at once, the last attempt's error propagates.
+    A provider asking to wait longer than MAX_RETRY_AFTER_S (e.g. Groq's daily token limit:
+    "try again in 12m54s") is not retried: waiting 30 s and failing again would only burn
+    the agent's time budget and turn an honest 503 rate limit into a 504 timeout.
     """
     for attempt, delay in enumerate(RETRY_DELAYS_S):
         try:
             return await call()
         except Exception as exc:
             retry = classify(exc)
-            if retry is None:
+            if retry is None or (retry.after_s or 0) > MAX_RETRY_AFTER_S:
                 raise
-            wait = min(retry.after_s, MAX_RETRY_AFTER_S) if retry.after_s is not None else delay
+            wait = retry.after_s if retry.after_s is not None else delay
             logger.warning(
                 "llm provider returned %s, retry %d/%d in %.1f s",
                 retry.reason,

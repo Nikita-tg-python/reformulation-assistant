@@ -53,6 +53,8 @@ k8s-up: k8s-secrets  ## kind cluster + image + kubectl apply -k k8s/ (ingest Job
 	kind load docker-image $(K8S_IMAGE) --name $(KIND_CLUSTER)
 	-@$(KUBECTL) delete job ingest --ignore-not-found 2>/dev/null
 	kubectl apply -k k8s/
+	@# Same tag (:local) for every build, so apply sees no change: restart to pick up the new image.
+	$(KUBECTL) rollout restart deployment/api
 	$(KUBECTL) rollout status statefulset/postgres --timeout=180s
 	$(KUBECTL) rollout status deployment/api --timeout=300s
 

@@ -1,6 +1,6 @@
 """Retry policy for LLM providers: at most 2 retries, pauses 2 s and 5 s.
 
-Retryable: 429 and 503 on both providers, and 400 output_parse_failed on Groq.
+Retryable: 429 and 503 on both providers, and 400 output_parse_failed / tool_use_failed on Groq.
 """
 
 import groq
@@ -69,12 +69,22 @@ async def test_gives_up_after_two_retries(pauses):
     assert pauses.recorded == [2.0, 5.0]
 
 
-async def test_retry_after_replaces_the_fixed_pause_and_is_capped(pauses):
-    call = script(ProviderError(429, retry_after=7), ProviderError(429, retry_after=120), "ok")
+async def test_retry_after_replaces_the_fixed_pause(pauses):
+    call = script(ProviderError(429, retry_after=7), ProviderError(429, retry_after=30), "ok")
 
     await with_retries(call, classify, sleep=pauses)
 
     assert pauses.recorded == [7, MAX_RETRY_AFTER_S]
+
+
+async def test_a_wait_longer_than_the_cap_is_not_retried(pauses):
+    # Live: Groq's daily token limit asked for 12m54s; two 30 s retries only ended in a 504.
+    call = script(ProviderError(429, retry_after=774), "ok")
+
+    with pytest.raises(ProviderError):
+        await with_retries(call, classify, sleep=pauses)
+
+    assert pauses.recorded == []
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 500, 504])
@@ -128,10 +138,14 @@ def test_groq_retries_rate_limit_and_overload_with_retry_after():
 
 def test_groq_retries_output_parse_failed_quickly_but_no_other_400():
     parse_failed = _groq_error(groq.BadRequestError, 400, "output_parse_failed")
+    tool_use_failed = _groq_error(groq.BadRequestError, 400, "tool_use_failed")
     other_400 = _groq_error(groq.BadRequestError, 400, "context_length_exceeded")
 
     assert groq_module._retry_info(parse_failed) == Retry(
         "400 output_parse_failed", groq_module.PARSE_FAILED_RETRY_S
+    )
+    assert groq_module._retry_info(tool_use_failed) == Retry(
+        "400 tool_use_failed", groq_module.PARSE_FAILED_RETRY_S
     )
     assert groq_module._retry_info(other_400) is None
 
