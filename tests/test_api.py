@@ -66,7 +66,7 @@ async def test_health_ok_and_request_id(make_client):
     response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "db": "ok", "llm_provider": "gemini"}
+    assert response.json() == {"status": "ok", "db": "ok", "llm_provider": "groq"}
     assert len(response.headers["x-request-id"]) == 16
 
     echoed = await client.get("/health", headers={"X-Request-ID": "trace-me-1"})

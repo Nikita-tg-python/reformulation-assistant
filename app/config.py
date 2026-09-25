@@ -12,7 +12,8 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql://postgres:postgres@localhost:5433/reformulation"
 
-    llm_provider: Literal["gemini", "groq"] = "gemini"
+    # groq by default: on free tiers it was the stable one (see README, live agent state).
+    llm_provider: Literal["gemini", "groq"] = "groq"
     gemini_api_key: SecretStr | None = None
     gemini_model: str | None = None
     groq_api_key: SecretStr | None = None

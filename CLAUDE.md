@@ -6,23 +6,25 @@ HTTP-сервіс для харчової R&D: технолог подає ре�
 з власним циклом tool calling (3 інструменти: `search_knowledge_base`, `lookup_product`, `calc_nutrition`).
 Фронтенду немає, демо через Swagger UI на `/docs`.
 
-Повна специфікація (схема БД, ендпоінти, ліміти агента, тести, критерії готовності, план на день): [docs/spec.md](docs/spec.md).
+Повна специфікація (схема БД, ендпоінти, ліміти агента, тести, критерії готовності, план на день): [docs/task.docx](docs/task.docx).
 
 ## Стек
 Python 3.12, uv, FastAPI, Pydantic v2, pydantic-settings, uvicorn, asyncpg з ручним SQL, PostgreSQL 16 + pgvector
 (`pgvector/pgvector:pg16`, індекс hnsw, косинусна відстань), ембединги `intfloat/multilingual-e5-small` (384) через ONNX Runtime без torch (не MiniLM зі спеки, бо корпус український),
-LLM: Gemini (основний), Groq (запасний), Open Food Facts API, Docker Compose, pytest + pytest-asyncio + httpx, ruff.
+LLM: Groq (за замовчуванням, `LLM_PROVIDER=groq`) або Gemini, Open Food Facts API, Docker Compose, pytest + pytest-asyncio + httpx, ruff.
 
 ## Структура
 ```
-app/            main.py, config.py, db.py, schemas.py, embeddings.py, chunking.py, retrieval.py, ingest.py
-app/llm/        base.py (LLMClient), gemini.py, groq.py, fake.py (FakeLLM для тестів)
-app/agent/      loop.py (цикл tool calling), tools.py (3 інструменти + JSON-схеми), prompts.py
+app/            main.py, config.py, db.py, schemas.py, embeddings.py, chunking.py, retrieval.py,
+                ingest.py, errors.py, deps.py, logging_config.py
+app/llm/        base.py (LLMClient, повтори), gemini.py, groq.py, fake.py (FakeLLM для тестів)
+app/agent/      loop.py (цикл tool calling), pipeline.py (фіксований пайплайн, AGENT_MODE=pipeline),
+                tools.py (3 інструменти + JSON-схеми), prompts.py
 app/routers/    documents.py, ask.py, reformulate.py
 data/corpus/    20 markdown-документів з frontmatter doc_id, title, doc_type
-migrations/     001_init.sql, застосовується на старті додатка (без Alembic)
-tests/          test_chunking, test_calc_nutrition, test_agent_loop, test_api
-k8s/            бонус
+migrations/     001_init.sql, 002_run_request_id.sql; застосовуються на старті (без Alembic)
+tests/          test_chunking, test_calc_nutrition, test_agent_loop, test_pipeline, test_tools,
+                test_llm_retries, test_api (+ conftest.py, fakes.py)
 ```
 
 ## Жорсткі правила
